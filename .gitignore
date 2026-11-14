@@ -1,0 +1,11 @@
+gen/
+classes/
+classes2/
+dexout/
+build/
+tools/ui.xml
+tools/full.log
+tools/shot*.png
+tools/installed.apk
+*.apk
+*.idsig
