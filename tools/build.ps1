@@ -16,7 +16,7 @@ $apksignerJar = "$BT\lib\apksigner.jar"
 $zipalign   = "$BT\zipalign.exe"
 
 $Name = "LugeKey"
-$Version = "0.1.5"
+$Version = "0.2.2"
 
 Push-Location $Root
 try {

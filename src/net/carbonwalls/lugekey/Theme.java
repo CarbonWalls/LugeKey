@@ -1,83 +1,70 @@
 package net.carbonwalls.lugekey;
 
-import android.content.Context;
 import android.graphics.Color;
-import android.graphics.Typeface;
 
-/** Resolves the current colour palette from settings. Futo-style flat minimal. */
+/** Curated FUTO-style palettes. Each palette fully describes the keyboard look. */
 public final class Theme {
 
-    public static final int[] ACCENTS = {
-            0xFF3D7BFF, 0xFF0A84FF, 0xFF34C759, 0xFFAF52DE,
-            0xFFFF9F0A, 0xFFFF3B30, 0xFF30B0C7, 0xFF8E8E93
+    public static final class Palette {
+        public final String name;
+        public final boolean dark;
+        public final int bg;        // behind the keys
+        public final int key;       // normal key fill
+        public final int keyFunc;   // function key fill (shift/backspace/toolbar)
+        public final int keyBorder; // hairline border
+        public final int pressed;   // pressed fill
+        public final int text;      // primary label
+        public final int textFunc;  // function label
+        public final int hint;      // small symbol-hint text
+        public final int accent;    // tint (shift-on, popover, selected)
+
+        Palette(String name, boolean dark, int bg, int key, int keyFunc, int keyBorder,
+                int pressed, int text, int textFunc, int hint, int accent) {
+            this.name = name; this.dark = dark;
+            this.bg = bg; this.key = key; this.keyFunc = keyFunc; this.keyBorder = keyBorder;
+            this.pressed = pressed; this.text = text; this.textFunc = textFunc;
+            this.hint = hint; this.accent = accent;
+        }
+
+        public int funcPressed() {
+            return blend(keyFunc, accent, 0.55f);
+        }
+    }
+
+    public static final Palette[] PALETTES = {
+            new Palette("Light", false,
+                    0xFFF0F1F5, 0xFFFFFFFF, 0xFFE4E6ED, 0xFFD6D9E2, 0xFFDDE0EA,
+                    0xFF1B1C22, 0xFF5A5D68, 0xFF9AA0AD, 0xFF6C63FF),
+            new Palette("Ayu", false,
+                    0xFFF7F3EC, 0xFFFFFFFF, 0xFFECE6DA, 0xFFE0D9C9, 0xFFE9E2D3,
+                    0xFF3A342A, 0xFF7A715F, 0xFFB3A98F, 0xFFFF8A4C),
+            new Palette("Ocean", false,
+                    0xFFEAF2FA, 0xFFFFFFFF, 0xFFD9E6F2, 0xFFCDDCEB, 0xFFDFEAF6,
+                    0xFF20303F, 0xFF4E6B82, 0xFF8AA4BA, 0xFF1F8FFF),
+            new Palette("Coal", true,
+                    0xFF17181C, 0xFF232429, 0xFF1D1E23, 0xFF2E3037, 0xFF34363E,
+                    0xFFE9EAEE, 0xFF9AA0A8, 0xFF62666E, 0xFF8A7BFF),
+            new Palette("Navy", true,
+                    0xFF111925, 0xFF1C2835, 0xFF172230, 0xFF2A3A4C, 0xFF31455A,
+                    0xFFE9EFF5, 0xFF9FB2C5, 0xFF5F7488, 0xFF4C9AFF),
+            new Palette("Rust", true,
+                    0xFF1B1510, 0xFF2B2218, 0xFF241D15, 0xFF3A2F22, 0xFF463827,
+                    0xFFF0E5DA, 0xFFBDA892, 0xFF7E6D59, 0xFFFF8A4C),
+            new Palette("Midnight", true,
+                    0xFF0D0F13, 0xFF191C22, 0xFF14171C, 0xFF262B34, 0xFF2D3340,
+                    0xFFDDE3EA, 0xFF8A94A3, 0xFF525A66, 0xFF35E0A1),
+            new Palette("Rose", true,
+                    0xFF1C1520, 0xFF2B2030, 0xFF241A28, 0xFF3B2C42, 0xFF493351,
+                    0xFFF2E4F5, 0xFFC09FC9, 0xFF8A6A92, 0xFFFF5F8F),
     };
 
-    public final boolean dark;
-    public final int accent;
-    public final int bg;
-    public final int key;
-    public final int keyFunc;
-    public final int keyPressed;
-    public final int text;
-    public final int textFunc;
-    public final int keyBorder;
-    public final int scrim;
+    private Theme() {}
 
-    private Theme(boolean dark, int accent,
-                  int bg, int key, int keyFunc, int keyPressed,
-                  int text, int textFunc, int keyBorder, int scrim) {
-        this.dark = dark;
-        this.accent = accent;
-        this.bg = bg;
-        this.key = key;
-        this.keyFunc = keyFunc;
-        this.keyPressed = keyPressed;
-        this.text = text;
-        this.textFunc = textFunc;
-        this.keyBorder = keyBorder;
-        this.scrim = scrim;
-    }
-
-    public static Theme load(Context c, Prefs prefs) {
-        boolean dark = prefs.dark()
-                || (c.getResources().getConfiguration().uiMode
-                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
-                   == android.content.res.Configuration.UI_MODE_NIGHT_YES
-                || darkSystem(c);
-        int accent = ACCENTS[Math.max(0, Math.min(ACCENTS.length - 1, prefs.accent()))];
-        if (dark) {
-            return new Theme(true, accent,
-                    0xFF121317,       // bg
-                    0xFF26272E,       // key
-                    0xFF1E1F26,       // function key
-                    0xFF3A3B44,       // pressed
-                    0xFFF2F3F7,       // text
-                    0xFFC7C9D1,       // function text
-                    0xFF3A3B44,       // border
-                    0xB3000000);      // scrim
-        } else {
-            return new Theme(false, accent,
-                    0xFFEDEEF2,       // bg
-                    0xFFFFFFFF,       // key
-                    0xFFE1E3EA,       // function key
-                    0xFFD9DCE6,       // pressed
-                    0xFF191A1F,       // text
-                    0xFF4A4C55,       // function text
-                    0xFFD9DCE6,       // border
-                    0x66000000);      // scrim
-        }
-    }
-
-    public Typeface bold() { return Typeface.DEFAULT_BOLD; }
-
-    private static boolean darkSystem(Context c) {
-        try {
-            int mode = c.getResources().getConfiguration().uiMode
-                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
-            return mode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
-        } catch (Exception e) {
-            return false;
-        }
+    /** Load current palette from settings (clamped index). */
+    public static Palette current(Prefs prefs) {
+        int i = prefs.theme();
+        if (i < 0 || i >= PALETTES.length) i = 0;
+        return PALETTES[i];
     }
 
     public static int blend(int a, int b, float t) {

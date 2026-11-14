@@ -2,6 +2,8 @@ package net.carbonwalls.lugekey;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -10,7 +12,6 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowManager;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -21,25 +22,36 @@ import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.text.TextUtils;
 
 import java.util.ArrayList;
 import java.util.List;
 
-/** Settings + keyboard layout editor. Fully dependency-free, built in code. */
+/** LugeKey settings: themes, keyboard behaviour, clipboard manager and the layout/key editor. */
 public class SettingsActivity extends Activity {
 
     private Prefs prefs;
     private final List<List<KeyDef>> alpha = new ArrayList<>();
     private final List<List<KeyDef>> symbols = new ArrayList<>();
 
-    private LinearLayout editorHost;
-    private LinearLayout accentHost;
+    private LinearLayout root;
+    private LinearLayout themeHost;
     private LinearLayout dirHost;
+    private LinearLayout editorHost;
+    private LinearLayout clipHost;
 
-    private static final String[] DIRS = {KeyDef.DIR_UP, KeyDef.DIR_DOWN, KeyDef.DIR_LEFT, KeyDef.DIR_RIGHT};
     private static final String[] KIND_NAMES = {
-            "Letter / text", "Space", "Backspace", "Enter",
-            "Shift", "Symbols toggle", "Switch IME", "Tab"};
+            "Text / letter", "Space", "Backspace", "Enter", "Shift",
+            "Symbols page", "Switch IME", "Tab", "Delete word", "Undo",
+            "Cursor left", "Cursor right", "Home", "End", "Clipboard", "Emoji", "Open settings"};
+
+    private static final int[] KIND_VALUES = {
+            KeyDef.CONTENT, KeyDef.SPACE, KeyDef.BACKSPACE, KeyDef.ENTER, KeyDef.SHIFT,
+            KeyDef.SYMBOLS, KeyDef.SWITCH_IME, KeyDef.TAB, KeyDef.DELETE_WORD, KeyDef.UNDO,
+            KeyDef.CURSOR_LEFT, KeyDef.CURSOR_RIGHT, KeyDef.HOME, KeyDef.END, KeyDef.CLIPBOARD,
+            KeyDef.EMOJI, KeyDef.SETTINGS};
+
+    private static final String[] DIRS = {KeyDef.DIR_UP, KeyDef.DIR_DOWN, KeyDef.DIR_LEFT, KeyDef.DIR_RIGHT, KeyDef.DIR_NONE};
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,147 +65,237 @@ public class SettingsActivity extends Activity {
         setContentView(buildRoot());
     }
 
-    /* ---------------- UI construction ---------------- */
-
     private View buildRoot() {
         ScrollView sc = new ScrollView(this);
         sc.setFillViewport(false);
-        LinearLayout root = new LinearLayout(this);
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(24), dp(20), dp(32));
+        root.setPadding(dp(16), dp(24), dp(16), dp(36));
         sc.addView(root, new ViewGroup.LayoutParams(MATCH, MATCH));
 
-        // header
-        LinearLayout head = row(LinearLayout.VERTICAL);
-        TextView t1 = label("LugeKey", 30, true, 0xFF11111A);
-        TextView t2 = label("Minimal keyboard · swipe a key to reveal its extra characters", 13, false, 0xFF8A8A99);
-        head.addView(t1);
-        head.addView(t2, margin(0, dp(2), 0, 0));
-        root.addView(head, margin(0, 0, 0, dp(8)));
+        root.addView(label("LugeKey", 30, true, 0xFF17181C));
+        root.addView(label("FUTO-minimal keyboard with CleverKeys-style keys. Swipe a key to reveal its subkeys.",
+                13, false, 0xFF8A8F99), margin(dp(0), dp(2), 0, 0));
 
-        // quick typing test field — the keyboard is set as default, so tapping this shows LugeKey
         EditText test = new EditText(this);
-        test.setHint("Tap here and type — swipe up on a letter for its extra characters");
-        test.setSingleLine(false);
+        test.setHint("Tap here, then swipe up on a letter to reveal subkeys");
         test.setMinLines(2);
-        test.setTextSize(16);
+        test.setSingleLine(false);
+        test.setTextSize(15);
         test.setPadding(dp(12), dp(10), dp(12), dp(10));
-        GradientDrawable tg = new GradientDrawable();
-        tg.setColor(0xFFF3F4F9);
-        tg.setCornerRadius(dp(10));
-        tg.setStroke(dp(1), 0xFFE4E6EE);
-        test.setBackground(tg);
-        root.addView(test, margin(0, 0, 0, dp(2)));
-        voidLine(root);
+        test.setBackground(round(0xFFFFFFFF, dp(10)));
+        root.addView(test, marginW(dp(0), dp(14), 0, 0));
 
-        buildAppearance(root);
-        buildBehavior(root);
+        buildTheme();
+        buildKeyboard();
+        buildPopups();
+        buildSound();
 
-        // layout editors
-        addSection(root, "Keyboard layout");
+        addSection("Clipboard history");
+        clipHost = new LinearLayout(this);
+        clipHost.setOrientation(LinearLayout.VERTICAL);
+        root.addView(cardWrap(clipHost), marginW(0, dp(4), 0, 0));
+        renderClips();
+
+        addSection("Keyboard layout");
         editorHost = new LinearLayout(this);
         editorHost.setOrientation(LinearLayout.VERTICAL);
-        root.addView(editorHost);
+        root.addView(editorHost, marginW(0, dp(4), 0, 0));
         renderEditors();
 
-        // reset
-        LinearLayout resetRow = row(LinearLayout.HORIZONTAL, Gravity.CENTER_HORIZONTAL);
-        resetRow.addView(button("Reset letters to default", v -> {
+        LinearLayout resetRow = row(Gravity.CENTER_HORIZONTAL);
+        resetRow.addView(btn("Reset letters", v -> {
             LayoutStore.reset(this, true);
             alpha.clear(); alpha.addAll(LayoutStore.load(this, true));
             renderEditors();
-        }), margin(0, 0, dp(8), 0));
-        resetRow.addView(button("Reset symbols to default", v -> {
+        }), margin(0, dp(10), dp(8), 0));
+        resetRow.addView(btn("Reset symbols", v -> {
             LayoutStore.reset(this, false);
             symbols.clear(); symbols.addAll(LayoutStore.load(this, false));
             renderEditors();
-        }));
-        root.addView(resetRow, margin(0, dp(12), 0, 0));
+        }), margin(0, dp(10), 0, 0));
+        root.addView(resetRow);
 
-        TextView foot = label("To use: Settings → System → Languages & input → Keyboards → LugeKey.\n"
-                + "The popup opens instantly when you swipe a key up (configurable per key).", 12, false, 0xFF9A9AA8);
-        root.addView(foot, margin(0, dp(20), 0, 0));
+        root.addView(label("Enable LugeKey: Settings \u2192 System \u2192 Languages & input \u2192 Keyboards.\n"
+                + "Subkeys open instantly when you swipe a key (long-press optional).", 12, false, 0xFF9AA0AC),
+                marginW(0, dp(16), 0, 0));
 
         return sc;
     }
 
-    private void buildAppearance(LinearLayout root) {
-        addSection(root, "Appearance");
+    /* ---------------- theme picker ---------------- */
 
-        Switch dark = new Switch(this);
-        dark.setChecked(prefs.dark());
-        dark.setOnCheckedChangeListener((b, v) -> prefs.setDark(v));
-        root.addView(toggleRow("Dark keyboard", "Follows your taste (defaults off)", dark), margin(0, dp(2), 0, 0));
-
-        accentHost = new LinearLayout(this);
-        accentHost.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < Theme.ACCENTS.length; i++) {
-            final int idx = i;
-            View dot = accentDot(Theme.ACCENTS[i], i == prefs.accent());
-            dot.setOnClickListener(v -> { prefs.setAccent(idx); renderAccent(); });
-            accentHost.addView(dot, accentDotLP(i));
-        }
-        root.addView(accentHost, margin(0, dp(10), 0, 0));
-        root.addView(label("Accent colour", 13, false, 0xFF8A8A99), margin(0, dp(2), 0, 0));
-
-        RootedSeek height = new RootedSeek(this);
-        height.configure("Keyboard height", 36, 64, prefs.heightDp(),
-                v -> prefs.setHeightDp(v));
-        root.addView(height, margin(0, dp(10), 0, 0));
-
-        RootedSeek font = new RootedSeek(this);
-        font.configure("Key text size", 80, 140, prefs.fontPercent(),
-                v -> prefs.setFontPercent(v));
-        root.addView(font, margin(0, dp(10), 0, 0));
-
-        Switch numberRow = new Switch(this);
-        numberRow.setChecked(prefs.numberRow());
-        numberRow.setOnCheckedChangeListener((b, v) -> prefs.setNumberRow(v));
-        root.addView(toggleRow("Top number row", "Digits 1–0 above the letters", numberRow), margin(0, dp(2), 0, 0));
-
-        voidLine(root);
+    private void buildTheme() {
+        addSection("Theme");
+        themeHost = new LinearLayout(this);
+        themeHost.setOrientation(LinearLayout.VERTICAL);
+        root.addView(themeHost, marginW(0, dp(4), 0, 0));
+        renderThemes();
     }
 
-    private void buildBehavior(LinearLayout root) {
-        addSection(root, "Popup & behaviour");
+    private void renderThemes() {
+        themeHost.removeAllViews();
+        for (int i = 0; i < Theme.PALETTES.length; i += 2) {
+            LinearLayout r = row(0);
+            r.addView(themeCard(i), weight());
+            if (i + 1 < Theme.PALETTES.length) {
+                r.addView(themeCard(i + 1), weight());
+            } else {
+                r.addView(new View(this), weight());
+            }
+            themeHost.addView(r, marginW(0, 0, 0, dp(6)));
+        }
+    }
 
+    private View themeCard(final int index) {
+        Theme.Palette p = Theme.PALETTES[index];
+        boolean selected = prefs.theme() == index;
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(4), dp(12), dp(4), dp(10));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(p.bg);
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(selected ? 3 : 1), selected ? p.accent : 0xFFD5D8E0);
+        card.setBackground(bg);
+
+        LinearLayout keys = new LinearLayout(this);
+        keys.setOrientation(LinearLayout.HORIZONTAL);
+        keys.setGravity(Gravity.CENTER);
+        keys.addView(keyDot(p.accent, p.key));
+        keys.addView(keyDot(p.keyFunc, p.text), margin(dp(4), 0, dp(4), 0));
+        keys.addView(keyDot(p.key, p.text));
+        card.addView(keys);
+
+        TextView name = new TextView(this);
+        name.setText(p.name);
+        name.setTextSize(12);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setTextColor(p.text);
+        name.setGravity(Gravity.CENTER);
+        name.setPadding(0, dp(7), 0, 0);
+        card.addView(name);
+
+        card.setOnClickListener(v -> {
+            prefs.setTheme(index);
+            renderThemes();
+        });
+        return card;
+    }
+
+    private View keyDot(int fill, int stroke) {
+        View v = new View(this);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(fill);
+        g.setStroke(dp(2), stroke);
+        v.setBackground(g);
+        return v;
+    }
+
+    /* ---------------- sections ---------------- */
+
+    private void buildKeyboard() {
+        addSection("Keyboard");
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.addView(toggle("Toolbar", "Clipboard, undo, emoji, cursor, settings", prefs.toolbar(), prefs::setToolbar));
+        card.addView(toggle("Number row", "Digits 1-0 above the letters", prefs.numberRow(), prefs::setNumberRow));
+        card.addView(toggle("Arrow row", "\u25C0 \u2302 Home/End \u25B6 row", prefs.arrowRow(), prefs::setArrowRow));
+        card.addView(toggle("Symbol hints", "Small hint on each letter key", prefs.hints(), prefs::setHints));
+        card.addView(toggle("Auto-capitalise", "After . ? !", prefs.autoCap(), prefs::setAutoCap));
+        card.addView(seek("Keyboard height", 38, 66, prefs.heightDp(), prefs::setHeightDp));
+        card.addView(seek("Key text size", 80, 140, prefs.fontPercent(), prefs::setFontPercent));
+        root.addView(cardWrap(card), marginW(0, dp(4), 0, 0));
+    }
+
+    private void buildPopups() {
+        addSection("Swipe popup");
         dirHost = new LinearLayout(this);
         dirHost.setOrientation(LinearLayout.HORIZONTAL);
         for (final String d : DIRS) {
             Button b = new Button(this);
-            b.setText(cap(d));
+            b.setText(d);
             b.setAllCaps(false);
-            b.setTextSize(13);
-            b.setMinWidth(dp(56));
+            b.setTextSize(12);
+            b.setMinWidth(0);
+            b.setPadding(dp(10), 0, dp(10), 0);
             b.setOnClickListener(v -> { prefs.setPopupDir(d); renderDir(); });
             dirHost.addView(b, margin(0, 0, dp(6), 0));
         }
-        root.addView(dirHost, margin(0, dp(4), 0, 0));
-        root.addView(label("Default swipe direction for popups (each key can override)", 12, false, 0xFF9A9AA8),
-                margin(0, 0, 0, dp(6)));
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.addView(dirHost);
         renderDir();
+        card.addView(label("Default swipe direction that opens subkeys (each key can override)", 11, false, 0xFF8A8F99),
+                margin(0, dp(2), 0, dp(4)));
+        card.addView(toggle("Long-press also opens subkeys", "Optional; off by default", prefs.longPressPopup(), prefs::setLongPressPopup));
+        root.addView(cardWrap(card), marginW(0, dp(4), 0, 0));
+    }
 
-        Switch lp = new Switch(this);
-        lp.setChecked(prefs.longPressPopup());
-        lp.setOnCheckedChangeListener((b, v) -> prefs.setLongPressPopup(v));
-        root.addView(toggleRow("Allow long-press popup too", "Optional fallback; off by default", lp), margin(0, dp(2), 0, 0));
+    private void buildSound() {
+        addSection("Feedback");
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.addView(toggle("Key click sound", null, prefs.sound(), prefs::setSound));
+        card.addView(toggle("Haptic feedback", null, prefs.haptic(), prefs::setHaptic));
+        card.addView(toggle("Save typed words to clipboard", "Builds history from long words you type", prefs.saveTyped(), prefs::setSaveTyped));
+        root.addView(cardWrap(card), marginW(0, dp(4), 0, dp(6)));
+    }
 
-        Switch ac = new Switch(this);
-        ac.setChecked(prefs.autoCap());
-        ac.setOnCheckedChangeListener((b, v) -> prefs.setAutoCap(v));
-        root.addView(toggleRow("Auto-capitalise", "After . ? !", ac), margin(0, dp(2), 0, 0));
+    /* ---------------- clipboard manager ---------------- */
 
-        Switch so = new Switch(this);
-        so.setChecked(prefs.sound());
-        so.setOnCheckedChangeListener((b, v) -> prefs.setSound(v));
-        root.addView(toggleRow("Key click sound", null, so), margin(0, dp(2), 0, 0));
+    private void renderClips() {
+        clipHost.removeAllViews();
+        List<String> items = ClipboardHistory.load(this);
+        if (items.isEmpty()) {
+            clipHost.addView(label("Nothing copied yet. Copy text in any app or type long words through LugeKey.", 12, false, 0xFF8A8F99));
+        }
+        for (int i = 0; i < items.size(); i++) {
+            final int idx = i;
+            final String s = items.get(i);
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.HORIZONTAL);
+            item.setGravity(Gravity.CENTER_VERTICAL);
+            item.setBackground(round(0xFFF4F5F9, dp(8)));
+            item.setPadding(dp(10), dp(7), dp(10), dp(7));
 
-        Switch hh = new Switch(this);
-        hh.setChecked(prefs.haptic());
-        hh.setOnCheckedChangeListener((b, v) -> prefs.setHaptic(v));
-        root.addView(toggleRow("Haptic feedback", null, hh), margin(0, dp(2), 0, 0));
+            TextView tv = new TextView(this);
+            tv.setText(s.replace('\n', ' '));
+            tv.setSingleLine(true);
+            tv.setTextSize(13);
+            tv.setTextColor(0xFF33343B);
+            tv.setEllipsize(TextUtils.TruncateAt.END);
+            item.addView(tv, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
-        voidLine(root);
+            Button cp = miniBtn("copy", v -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("LugeKey", s));
+            });
+            Button del = miniBtn("del", v -> {
+                ClipboardHistory.remove(this, idx);
+                renderClips();
+            });
+            del.setTextColor(0xFFFF5F6D);
+            item.addView(cp, margin(dp(6), 0, dp(4), 0));
+            item.addView(del);
+            clipHost.addView(item, marginW(0, 0, 0, dp(6)));
+        }
+        if (!items.isEmpty()) {
+            Button clear = new Button(this);
+            clear.setText("Clear all");
+            clear.setAllCaps(false);
+            clear.setTextSize(13);
+            clear.setTextColor(0xFFFF5F6D);
+            clear.setBackground(round(0xFFFDEBED, dp(8)));
+            clear.setOnClickListener(v -> {
+                ClipboardHistory.clear(this);
+                renderClips();
+            });
+            clipHost.addView(clear);
+        }
     }
 
     /* ---------------- layout editor ---------------- */
@@ -201,7 +303,7 @@ public class SettingsActivity extends Activity {
     private void renderEditors() {
         editorHost.removeAllViews();
         editorHost.addView(layerEditor(true));
-        editorHost.addView(label(" ", 6, false, 0x00000000), margin(0, dp(8), 0, 0));
+        editorHost.addView(space(dp(10)));
         editorHost.addView(layerEditor(false));
     }
 
@@ -210,50 +312,43 @@ public class SettingsActivity extends Activity {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
 
-        TextView cap = label(letters ? "Letters layer  (tap a key to edit)" : "Symbols layer  (tap a key to edit)",
-                14, true, 0xFF3A3A46);
-        col.addView(cap, margin(0, dp(4), 0, dp(6)));
+        col.addView(label(letters ? "\u2022 Letters layer (tap a key to edit)" : "\u2022 Symbols layer (tap a key to edit)",
+                13, true, 0xFF44464F), margin(0, dp(2), 0, dp(6)));
 
         for (int r = 0; r < rows.size(); r++) {
             final int rowIdx = r;
             final List<KeyDef> row = rows.get(r);
 
-            LinearLayout head = row(LinearLayout.HORIZONTAL, Gravity.CENTER_VERTICAL);
-            TextView rn = label("Row " + (r + 1), 12, true, 0xFF8A8A99);
-            Button addK = new Button(this);
-            addK.setText("+ key");
-            addK.setAllCaps(false); addK.setTextSize(12); addK.setMinWidth(0);
-            addK.setOnClickListener(v -> addKeyDialog(letters, rowIdx));
-            Button delR = new Button(this);
-            delR.setText("\u00D7 row");
-            delR.setAllCaps(false); delR.setTextSize(12); delR.setMinWidth(0);
-            delR.setTextColor(0xFFC4473D);
-            delR.setOnClickListener(v -> {
+            LinearLayout head = row(Gravity.CENTER_VERTICAL);
+            head.addView(label("Row " + (r + 1), 11, true, 0xFF8A8F99), margin(0, 0, dp(10), 0));
+            head.addView(miniBtn("+ key", v -> addKeyDialog(letters, rowIdx)), margin(0, 0, dp(6), 0));
+            Button delR = miniBtn("\u00D7 row", v -> {
                 rows.remove(rowIdx);
                 persist(letters);
                 renderEditors();
             });
-            head.addView(rn, margin(0, 0, dp(10), 0));
-            head.addView(addK);
-            head.addView(delR, margin(dp(6), 0, 0, 0));
+            delR.setTextColor(0xFFC4473D);
+            head.addView(delR);
             col.addView(head, margin(0, dp(6), 0, dp(2)));
 
             HorizontalScrollView hsc = new HorizontalScrollView(this);
             hsc.setHorizontalScrollBarEnabled(false);
             LinearLayout chips = new LinearLayout(this);
             chips.setOrientation(LinearLayout.HORIZONTAL);
-            chips.setPadding(0, 0, dp(4), 0);
             for (int c = 0; c < row.size(); c++) {
                 final int colIdx = c;
                 chips.addView(keyChip(row.get(c), v -> editKeyDialog(letters, rowIdx, colIdx)), margin(0, 0, dp(5), 0));
             }
             hsc.addView(chips, new ViewGroup.LayoutParams(MATCH, WRAP));
-            col.addView(hsc, margin(0, 0, 0, dp(6)));
+            col.addView(hsc, marginW(0, 0, 0, dp(6)));
         }
 
         Button addRow = new Button(this);
         addRow.setText("+ add row");
         addRow.setAllCaps(false);
+        addRow.setTextSize(12);
+        addRow.setTextColor(0xFF3A3B42);
+        addRow.setBackground(round(0xFFE9EBF1, dp(8)));
         addRow.setOnClickListener(v -> addKeyDialog(letters, rows.size()));
         col.addView(addRow, margin(0, dp(2), 0, 0));
         return col;
@@ -261,32 +356,39 @@ public class SettingsActivity extends Activity {
 
     private View keyChip(final KeyDef k, View.OnClickListener click) {
         TextView t = new TextView(this);
-        String glyph = glyphFor(k);
-        t.setText(glyph);
-        t.setTextSize(13);
+        t.setText(chipGlyph(k));
+        t.setTextSize(12);
         t.setGravity(Gravity.CENTER);
         t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setTextColor(0xFF1E1E28);
-        t.setPadding(dp(12), dp(6), dp(12), dp(6));
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(0xFFEFF1F6);
-        g.setCornerRadius(dp(9));
-        t.setBackground(g);
+        t.setTextColor(0xFF24252C);
+        t.setPadding(dp(11), dp(7), dp(11), dp(7));
+        t.setBackground(round(0xFFE9EBF1, dp(9)));
         t.setOnClickListener(click);
-        if (k.popupEnabled && k.popup != null && !k.popup.isEmpty()) {
-            t.setText(glyph + "  \u2733");
-        }
         return t;
     }
 
-    private String glyphFor(KeyDef k) {
+    private String chipGlyph(KeyDef k) {
         switch (k.kind) {
-            case KeyDef.KIND_SHIFT: return "\u21E7";
-            case KeyDef.KIND_BACKSPACE: return "\u232B";
-            case KeyDef.KIND_ENTER: return "\u23CE";
-            case KeyDef.KIND_SPACE: return "space";
-            case KeyDef.KIND_SYMBOLS: return k.label;
-            default: return k.label;
+            case KeyDef.SHIFT: return "\u21E7";
+            case KeyDef.BACKSPACE: return "\u232B";
+            case KeyDef.ENTER: return "\u23CE";
+            case KeyDef.SPACE: return "space";
+            case KeyDef.SYMBOLS: return k.label;
+            case KeyDef.DELETE_WORD: return "\u232B\u00D7";
+            case KeyDef.UNDO: return "\u21A9";
+            case KeyDef.CURSOR_LEFT: return "\u25C0";
+            case KeyDef.CURSOR_RIGHT: return "\u25B6";
+            case KeyDef.HOME: return "\u23EA";
+            case KeyDef.END: return "\u23E9";
+            case KeyDef.CLIPBOARD: return "\uD83D\uDCCB";
+            case KeyDef.EMOJI: return "\uD83D\uDE00";
+            case KeyDef.SETTINGS: return "\u2699";
+            case KeyDef.SWITCH_IME: return "\uD83C\uDF10";
+            case KeyDef.TAB: return "\u21E5";
+            default: {
+                String h = k.firstSubkey();
+                return h == null ? k.label : (k.label + " " + h);
+            }
         }
     }
 
@@ -296,27 +398,30 @@ public class SettingsActivity extends Activity {
         List<List<KeyDef>> rows = letters ? alpha : symbols;
         final KeyDef k = rows.get(row).get(col);
         LinearLayout v = form();
-        final FieldBox out = field("Output (typed on tap):", k.output == null ? "" : k.output);
-        final FieldBox popup = field("Popup chars (swipe shows these):", k.popup == null ? "" : k.popup);
-        final Switch en = sw("Popup enabled", k.popupEnabled);
-        final Spinner dir = spinnerDir(k.popupDir);
         final Spinner kind = spinnerKind(k.kind);
-        v.addView(out);
-        v.addView(popup, margin(0, dp(8), 0, 0));
-        v.addView(en, margin(0, dp(8), 0, dp(8)));
-        v.addView(dir, margin(0, 0, 0, dp(8)));
+        final FieldBox label = field("Label shown", k.label);
+        final FieldBox output = field("Output (typed on tap)", k.output);
+        final FieldBox subs = field("Subkeys (comma-separated: chars, words or emoji)", join(k.subkeys));
+        final Spinner dir = spinnerDir(k.popupDir);
+        final FieldBox width = field("Width (1.0 default)", String.valueOf(k.width));
         v.addView(kind);
+        v.addView(label);
+        v.addView(output);
+        v.addView(subs);
+        v.addView(dir, margin(0, dp(6), 0, 0));
+        v.addView(width, margin(0, dp(6), 0, 0));
 
         new AlertDialog.Builder(this)
-                .setTitle("Edit: " + k.label)
+                .setTitle("Edit key")
                 .setView(v)
                 .setPositiveButton("Save", (d, w) -> {
-                    k.output = out.edit.getText().toString();
-                    k.popup = normalizePopup(popup.edit.getText().toString());
-                    k.label = k.output.isEmpty() ? k.label : k.output;
-                    k.popupEnabled = en.isChecked();
-                    k.popupDir = (String) dir.getSelectedItem();
-                    k.kind = spinnerKindValue(kind.getSelectedItemPosition());
+                    k.kind = KIND_VALUES[clamp(kind.getSelectedItemPosition())];
+                    k.label = label.edit.getText().toString();
+                    k.output = output.edit.getText().toString();
+                    k.subkeys = split(subs.edit.getText().toString());
+                    k.popupDir = String.valueOf(dir.getSelectedItem());
+                    try { k.width = Float.parseFloat(width.edit.getText().toString().trim()); } catch (Exception ignored) {}
+                    if (k.label.isEmpty()) k.label = k.output.isEmpty() ? "?" : k.output;
                     persist(letters);
                     renderEditors();
                 })
@@ -332,27 +437,28 @@ public class SettingsActivity extends Activity {
 
     private void addKeyDialog(final boolean letters, final int rowIdx) {
         LinearLayout v = form();
-        final FieldBox out = field("Output (typed on tap):", "");
-        final FieldBox popup = field("Popup chars (swipe shows these):", "");
+        final Spinner kind = spinnerKind(KeyDef.CONTENT);
+        final FieldBox label = field("Label shown", "K");
+        final FieldBox output = field("Output (typed on tap)", "");
+        final FieldBox subs = field("Subkeys (comma-separated)", "");
         final Spinner dir = spinnerDir(prefs.popupDir());
-        final Spinner kind = spinnerKind(KeyDef.KIND_CHAR);
-        v.addView(out);
-        v.addView(popup, margin(0, dp(8), 0, 0));
-        v.addView(dir, margin(0, dp(8), 0, dp(8)));
         v.addView(kind);
+        v.addView(label);
+        v.addView(output);
+        v.addView(subs);
+        v.addView(dir, margin(0, dp(6), 0, 0));
 
         new AlertDialog.Builder(this)
                 .setTitle("Add key")
                 .setView(v)
                 .setPositiveButton("Add", (d, w) -> {
                     KeyDef k = new KeyDef();
-                    k.kind = spinnerKindValue(kind.getSelectedItemPosition());
-                    k.output = out.edit.getText().toString();
-                    k.label = k.output.isEmpty() ? "?" : k.output;
-                    k.popup = normalizePopup(popup.edit.getText().toString());
-                    k.popupDir = (String) dir.getSelectedItem();
-                    k.popupEnabled = !k.popup.isEmpty();
-                    k.width = 1f;
+                    k.kind = KIND_VALUES[clamp(kind.getSelectedItemPosition())];
+                    k.label = label.edit.getText().toString();
+                    k.output = output.edit.getText().toString();
+                    k.subkeys = split(subs.edit.getText().toString());
+                    k.popupDir = String.valueOf(dir.getSelectedItem());
+                    if (k.label.isEmpty()) k.label = k.output.isEmpty() ? "K" : k.output;
                     List<List<KeyDef>> rows = letters ? alpha : symbols;
                     if (rowIdx >= rows.size()) {
                         List<KeyDef> nr = new ArrayList<>();
@@ -368,37 +474,40 @@ public class SettingsActivity extends Activity {
                 .show();
     }
 
-    private String normalizePopup(String raw) {
-        if (raw == null) return "";
+    private static int clamp(int i) {
+        return Math.max(0, Math.min(KIND_VALUES.length - 1, i));
+    }
+
+    private String join(List<String> list) {
         StringBuilder sb = new StringBuilder();
-        String[] toks = raw.trim().split("[\\s,]+");
-        for (String t : toks) {
-            if (t.isEmpty()) continue;
-            if (t.codePointCount(0, t.length()) == 1) {
-                sb.appendCodePoint(t.codePointAt(0));
-            } else {
-                int n = t.codePointCount(0, t.length());
-                for (int i = 0; i < n; i++) sb.appendCodePoint(t.codePointAt(t.offsetByCodePoints(0, i)));
-            }
+        for (String s : list) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(s);
         }
         return sb.toString();
+    }
+
+    private List<String> split(String raw) {
+        List<String> out = new ArrayList<>();
+        if (raw == null) return out;
+        for (String t : raw.split("[,]")) {
+            String s = t.trim();
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
     }
 
     private void persist(boolean letters) {
         LayoutStore.save(this, letters, letters ? alpha : symbols);
     }
 
-    /* ---------------- small builders ---------------- */
+    /* ---------------- builders ---------------- */
 
     private LinearLayout form() {
         LinearLayout v = new LinearLayout(this);
         v.setOrientation(LinearLayout.VERTICAL);
-        v.setPadding(dp(22), dp(14), dp(22), dp(4));
+        v.setPadding(dp(22), dp(12), dp(22), dp(4));
         return v;
-    }
-
-    private FieldBox field(String title, String value) {
-        return new FieldBox(this, title, value);
     }
 
     private static class FieldBox extends LinearLayout {
@@ -408,12 +517,13 @@ public class SettingsActivity extends Activity {
             setOrientation(VERTICAL);
             TextView cap = new TextView(c);
             cap.setText(title);
-            cap.setTextSize(12);
-            cap.setTextColor(0xFF8A8A99);
-            cap.setPadding(0, px(c, 8), 0, px(c, 2));
+            cap.setTextSize(11);
+            cap.setTextColor(0xFF8A8F99);
+            cap.setPadding(0, px(c, 6), 0, px(c, 2));
             edit = new EditText(c);
             edit.setText(value == null ? "" : value);
             edit.setSingleLine(true);
+            edit.setTextSize(14);
             addView(cap);
             addView(edit);
         }
@@ -422,136 +532,105 @@ public class SettingsActivity extends Activity {
         }
     }
 
-    private Switch sw(String title, boolean value) {
-        Switch s = new Switch(this);
-        s.setText(title);
-        s.setTextSize(14);
-        s.setChecked(value);
-        return s;
-    }
-
-    private Spinner spinnerDir(String cur) {
-        Spinner sp = new Spinner(this);
-        ArrayAdapter<String> ad = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, new String[]{KeyDef.DIR_UP, KeyDef.DIR_DOWN, KeyDef.DIR_LEFT, KeyDef.DIR_RIGHT, KeyDef.DIR_NONE});
-        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        sp.setAdapter(ad);
-        sp.setSelection(indexOf(DIRS, cur, 0));
-        return sp;
+    private FieldBox field(String title, String value) {
+        return new FieldBox(this, title, value);
     }
 
     private Spinner spinnerKind(int kind) {
         Spinner sp = new Spinner(this);
-        ArrayAdapter<String> ad = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, KIND_NAMES);
+        ArrayAdapter<String> ad = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, KIND_NAMES);
         ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         sp.setAdapter(ad);
-        sp.setSelection(kindToIndex(kind));
+        for (int i = 0; i < KIND_VALUES.length; i++) {
+            if (KIND_VALUES[i] == kind) { sp.setSelection(i); break; }
+        }
         return sp;
     }
 
-    private int kindToIndex(int kind) {
-        switch (kind) {
-            case KeyDef.KIND_SPACE: return 1;
-            case KeyDef.KIND_BACKSPACE: return 2;
-            case KeyDef.KIND_ENTER: return 3;
-            case KeyDef.KIND_SHIFT: return 4;
-            case KeyDef.KIND_SYMBOLS: return 5;
-            case KeyDef.KIND_SWITCH: return 6;
-            case KeyDef.KIND_TAB: return 7;
-            default: return 0;
+    private Spinner spinnerDir(String cur) {
+        Spinner sp = new Spinner(this);
+        ArrayAdapter<String> ad = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, DIRS);
+        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        sp.setAdapter(ad);
+        for (int i = 0; i < DIRS.length; i++) {
+            if (DIRS[i].equals(cur)) { sp.setSelection(i); break; }
         }
-    }
-
-    private int spinnerKindValue(int idx) {
-        switch (idx) {
-            case 1: return KeyDef.KIND_SPACE;
-            case 2: return KeyDef.KIND_BACKSPACE;
-            case 3: return KeyDef.KIND_ENTER;
-            case 4: return KeyDef.KIND_SHIFT;
-            case 5: return KeyDef.KIND_SYMBOLS;
-            case 6: return KeyDef.KIND_SWITCH;
-            case 7: return KeyDef.KIND_TAB;
-            default: return KeyDef.KIND_CHAR;
-        }
-    }
-
-    private int indexOf(String[] arr, String v, int def) {
-        for (int i = 0; i < arr.length; i++) if (arr[i].equals(v)) return i;
-        return def;
-    }
-
-    private void renderAccent() {
-        if (accentHost == null) return;
-        accentHost.removeAllViews();
-        for (int i = 0; i < Theme.ACCENTS.length; i++) {
-            final int idx = i;
-            View dot = accentDot(Theme.ACCENTS[i], i == prefs.accent());
-            dot.setOnClickListener(v -> { prefs.setAccent(idx); renderAccent(); });
-            accentHost.addView(dot, accentDotLP(i));
-        }
-    }
-
-    private View accentDot(int color, boolean selected) {
-        View v = new View(this);
-        GradientDrawable g = new GradientDrawable();
-        g.setShape(GradientDrawable.OVAL);
-        g.setColor(color);
-        if (selected) {
-            g.setStroke(dp(3), 0xFF11111A);
-        }
-        v.setBackground(g);
-        return v;
-    }
-
-    private LinearLayout.LayoutParams accentDotLP(int i) {
-        return margin(i == 0 ? 0 : dp(12), 0, 0, dp(4));
+        return sp;
     }
 
     private void renderDir() {
         if (dirHost == null) return;
+        String cur = prefs.popupDir();
         for (int i = 0; i < dirHost.getChildCount(); i++) {
             Button b = (Button) dirHost.getChildAt(i);
-            boolean sel = prefs.popupDir().equals(DIRS[i]);
-            b.setTextColor(sel ? Color.WHITE : 0xFF3A3A46);
+            boolean sel = DIRS[i].equals(cur);
+            b.setTextColor(sel ? Color.WHITE : 0xFF4A4B53);
             GradientDrawable g = new GradientDrawable();
-            g.setCornerRadius(dp(10));
-            g.setColor(sel ? 0xFF3D7BFF : 0xFFE9EBF1);
+            g.setCornerRadius(dp(9));
+            g.setColor(sel ? 0xFF6C63FF : 0xFFE9EBF1);
             b.setBackground(g);
         }
     }
 
-    private LinearLayout toggleRow(String title, String sub, Switch toggle) {
+    private View toggle(String title, String sub, boolean value, final BoolChange cb) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
-        texts.setPadding(0, dp(6), 0, dp(6));
-        TextView t = label(title, 15, false, 0xFF1E1E28);
-        t.setPadding(0, 0, dp(8), 0);
-        texts.addView(t);
-        if (sub != null) {
-            TextView s = label(sub, 12, false, 0xFF9A9AA8);
-            texts.addView(s);
-        }
-        row.addView(texts, margin(0, 0, dp(8), 0));
-        toggle.setGravity(Gravity.END);
-        row.addView(toggle, margin(0, 0, dp(0), 0));
+        texts.setPadding(0, dp(5), dp(6), dp(5));
+        texts.addView(label(title, 15, false, 0xFF24252C));
+        if (sub != null) texts.addView(label(sub, 11, false, 0xFF8A8F99));
+        Switch sw = new Switch(this);
+        sw.setChecked(value);
+        sw.setOnCheckedChangeListener((b, v) -> cb.change(v));
+        row.addView(texts, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        row.addView(sw);
         return row;
     }
 
-    private void addSection(LinearLayout parent, String title) {
-        TextView t = label(title.toUpperCase(), 11, true, 0xFF9A9AA8);
-        parent.addView(t, margin(0, dp(4), 0, dp(2)));
+    interface BoolChange { void change(boolean v); }
+
+    private View seek(String title, int min, int max, int cur, final IntChange cb) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        final TextView val = label(title + ": " + cur, 14, false, 0xFF3A3B42);
+        SeekBar sb = new SeekBar(this);
+        sb.setMax(max - min);
+        sb.setProgress(cur - min);
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                val.setText(title + ": " + (min + p));
+                if (fromUser) cb.change(min + p);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+        box.addView(val);
+        box.addView(sb);
+        return box;
     }
 
-    private void voidLine(LinearLayout parent) {
-        View v = new View(this);
-        v.setBackgroundColor(0xFFE4E6EE);
-        parent.addView(v, new LinearLayout.LayoutParams(MATCH, dp(1), 1f));
-        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) v.getLayoutParams();
-        lp.setMargins(0, dp(12), 0, dp(10));
+    interface IntChange { void change(int v); }
+
+    private void addSection(String title) {
+        root.addView(label(title.toUpperCase(), 11, true, 0xFF9AA0AC), margin(0, dp(14), 0, dp(2)));
+    }
+
+    private LinearLayout cardWrap(View inner) {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setPadding(dp(14), dp(8), dp(14), dp(8));
+        c.setBackground(round(0xFFFFFFFF, dp(14)));
+        c.addView(inner, new LinearLayout.LayoutParams(MATCH, WRAP));
+        return c;
+    }
+
+    private GradientDrawable round(int color, int radius) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(radius);
+        return g;
     }
 
     private TextView label(String s, float size, boolean bold, int color) {
@@ -564,32 +643,55 @@ public class SettingsActivity extends Activity {
         return t;
     }
 
-    private LinearLayout row(int orientation, int gravity) {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(orientation);
-        l.setGravity(gravity);
-        return l;
-    }
-
-    private LinearLayout row(int orientation) {
-        return row(orientation, Gravity.LEFT);
-    }
-
-    private static String cap(String s) {
-        if (s == null || s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
-    }
-
-    private Button button(String text, View.OnClickListener l) {
+    private Button btn(String text, View.OnClickListener l) {
         Button b = new Button(this);
         b.setText(text);
         b.setAllCaps(false);
+        b.setTextSize(12);
+        b.setTextColor(0xFF3A3B42);
+        b.setBackground(round(0xFFE9EBF1, dp(8)));
         b.setOnClickListener(l);
         return b;
     }
 
+    private Button miniBtn(String text, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(11);
+        b.setMinWidth(0);
+        b.setTextColor(0xFF3A3B42);
+        b.setPadding(dp(8), dp(3), dp(8), dp(3));
+        b.setBackground(round(0xFFE9EBF1, dp(7)));
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private LinearLayout row(int gravity) {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.HORIZONTAL);
+        l.setGravity(gravity);
+        return l;
+    }
+
+    private View space(int h) {
+        View v = new View(this);
+        v.setLayoutParams(new LinearLayout.LayoutParams(MATCH, dp(h)));
+        return v;
+    }
+
+    private LinearLayout.LayoutParams weight() {
+        return new LinearLayout.LayoutParams(0, WRAP, 1f);
+    }
+
     private LinearLayout.LayoutParams margin(int l, int t, int r, int b) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        lp.setMargins(l, t, r, b);
+        return lp;
+    }
+
+    private LinearLayout.LayoutParams marginW(int l, int t, int r, int b) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(MATCH, WRAP);
         lp.setMargins(l, t, r, b);
         return lp;
     }
@@ -600,45 +702,4 @@ public class SettingsActivity extends Activity {
 
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
-
-    /* Rooted seek slider with value label */
-    private static class RootedSeek extends LinearLayout {
-        private final TextView valueT;
-        private int minV;
-
-        RootedSeek(Context c) {
-            super(c);
-            setOrientation(VERTICAL);
-            valueT = new TextView(c);
-        }
-
-        void configure(String title, int min, int max, int cur, final OnChange cb) {
-            TextView cap = new TextView(getContext());
-            cap.setText(title);
-            cap.setTextSize(15);
-            cap.setTextColor(0xFF1E1E28);
-            valueT.setTextSize(12);
-            valueT.setTextColor(0xFF9A9AA8);
-            SeekBar sb = new SeekBar(getContext());
-            sb.setMax(max - min);
-            sb.setProgress(Math.max(0, Math.min(max - min, cur - min)));
-            minV = min;
-            valueT.setText(String.valueOf(cur));
-            sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-                @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
-                    valueT.setText(String.valueOf(minV + p));
-                    if (fromUser) cb.changed(minV + p);
-                }
-                @Override public void onStartTrackingTouch(SeekBar s) {}
-                @Override public void onStopTrackingTouch(SeekBar s) {}
-            });
-            addView(cap);
-            addView(valueT);
-            addView(sb);
-        }
-
-        interface OnChange {
-            void changed(int v);
-        }
-    }
 }

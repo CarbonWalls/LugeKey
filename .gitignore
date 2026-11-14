@@ -9,3 +9,4 @@ tools/shot*.png
 tools/installed.apk
 *.apk
 *.idsig
+tools/*.png

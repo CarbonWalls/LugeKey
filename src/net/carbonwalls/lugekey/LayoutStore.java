@@ -6,147 +6,187 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
-/** Serialises/deserialises keyboard layouts as JSON in prefs, plus the default layouts. */
+/** Default layers + JSON persistence for user layouts, and the emoji page. */
 public final class LayoutStore {
 
     private LayoutStore() {}
 
-    /* ---------------- defaults ---------------- */
+    /* ---------------- helpers ---------------- */
 
-    private static KeyDef ch(String label, String popup) {
-        KeyDef k = new KeyDef(KeyDef.KIND_CHAR, label, label, popup == null ? "" : popup, 1f);
+    private static KeyDef ct(String label, String output, List<String> sub, float w) {
+        KeyDef k = new KeyDef(KeyDef.CONTENT, label, output == null ? label : output, sub, w);
         k.id = label.hashCode();
         return k;
     }
 
-    private static KeyDef special(int kind, String label, String output, float width) {
-        KeyDef k = new KeyDef(kind, label, output, "", width);
-        k.id = label.hashCode() * 31 + kind;
+    private static KeyDef act(int kind, String label, float w) {
+        KeyDef k = new KeyDef(kind, label, "", null, w);
+        k.id = label.hashCode() + kind;
         return k;
     }
+
+    private static List<String> sk(String... s) {
+        return new ArrayList<>(Arrays.asList(s));
+    }
+
+    private static List<KeyDef> row(KeyDef... ks) {
+        return new ArrayList<>(Arrays.asList(ks));
+    }
+
+    /* ---------------- default letters ---------------- */
 
     public static List<List<KeyDef>> defaultAlpha() {
         List<List<KeyDef>> rows = new ArrayList<>();
 
-        rows.add(list(
-                ch("q", "ǫ"),
-                ch("w", "w"),
-                ch("e", "éèêë€"),
-                ch("r", "ŕř"),
-                ch("t", "ťþ"),
-                ch("y", "ýÿ"),
-                ch("u", "úùûüµ"),
-                ch("i", "íìîï"),
-                ch("o", "óòôöõø"),
-                ch("p", "þ¶")));
+        rows.add(row(
+                ct("q", "q", sk("1", "«"), 1f),
+                ct("w", "w", sk("2", "@"), 1f),
+                ct("e", "e", sk("3", "\u00E9\u00E8\u00EA\u00EB"), 1f),
+                ct("r", "r", sk("4", "\u0159"), 1f),
+                ct("t", "t", sk("5", "\u0165"), 1f),
+                ct("y", "y", sk("6", "\u00FD\u00FF"), 1f),
+                ct("u", "u", sk("7", "\u00FA\u00F9\u00FB\u00FC"), 1f),
+                ct("i", "i", sk("8", "\u00ED\u00EC\u00EE\u00EF"), 1f),
+                ct("o", "o", sk("9", "\u00F3\u00F2\u00F4\u00F5\u00F6"), 1f),
+                ct("p", "p", sk("0", "\u00F0"), 1f)));
 
-        rows.add(list(
-                ch("a", "áàâäãåæ@"),
-                ch("s", "šß§$"),
-                ch("d", "ðđ"),
-                ch("f", "ƒ"),
-                ch("g", "ğ"),
-                ch("h", "ĥ"),
-                ch("j", "ĵ"),
-                ch("k", "ķ"),
-                ch("l", "ł£")));
+        rows.add(row(
+                ct("a", "a", sk("@", "\u00E1\u00E0\u00E2\u00E4\u00E3\u00E5\u00E6"), 1f),
+                ct("s", "s", sk("#", "\u0161\u00DF\u00A7"), 1f),
+                ct("d", "d", sk("$", "\u0111\u00F0"), 1f),
+                ct("f", "f", sk("%", "\u0192"), 1f),
+                ct("g", "g", sk("&", "\u011F"), 1f),
+                ct("h", "h", sk("-", "\u0125"), 1f),
+                ct("j", "j", sk("+", "\u0135"), 1f),
+                ct("k", "k", sk("(", "\u0137"), 1f),
+                ct("l", "l", sk(")", "\u0142"), 1f)));
 
-        KeyDef shift = special(KeyDef.KIND_SHIFT, "shift", "", 1.5f);
+        KeyDef shift = act(KeyDef.SHIFT, "shift", 1.6f);
         shift.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(shift);
-        KeyDef bs = special(KeyDef.KIND_BACKSPACE, "\u232B", "", 1.5f);
+        KeyDef bs = act(KeyDef.BACKSPACE, "backspace", 1.6f);
         bs.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(bs);
-        rows.add(list(
+        rows.add(row(
                 shift,
-                ch("z", "žź"),
-                ch("x", "×"),
-                ch("c", "ç¢"),
-                ch("v", "v"),
-                ch("b", "ß"),
-                ch("n", "ñ"),
-                ch("m", "µ"),
+                ct("z", "z", sk("[", "\u017E\u017A"), 1f),
+                ct("x", "x", sk("]", "\u00D7"), 1f),
+                ct("c", "c", sk("{", "\u00E7\u00A2"), 1f),
+                ct("v", "v", sk("}", "v"), 1f),
+                ct("b", "b", sk("\\", "\u00DF"), 1f),
+                ct("n", "n", sk("~", "\u00F1"), 1f),
+                ct("m", "m", sk("^", "\u00B5"), 1f),
                 bs));
 
-        KeyDef sym = special(KeyDef.KIND_SYMBOLS, "?123", "?123", 1.4f);
+        KeyDef sym = act(KeyDef.SYMBOLS, "?123", 1.5f);
         sym.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(sym);
-        KeyDef enter = special(KeyDef.KIND_ENTER, "\u23CE", "", 1.4f);
-        enter.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(enter);
-        KeyDef comma = ch(",", "");
-        comma.width = 1f;
-        KeyDef period = ch(".", "");
-        period.width = 1f;
-        KeyDef space = special(KeyDef.KIND_SPACE, "space", " ", 5.2f);
+        KeyDef cls = act(KeyDef.CLIPBOARD, "clipboard", 1.1f);
+        cls.popupDir = KeyDef.DIR_NONE;
+        KeyDef comma = ct(",", ",", sk("!"), 1f);
+        KeyDef space = act(KeyDef.SPACE, "space", 4.6f);
         space.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(space);
-        rows.add(list(sym, comma, space, period, enter));
+        KeyDef dot = ct(".", ".", sk("?"), 1f);
+        KeyDef enter = act(KeyDef.ENTER, "enter", 1.5f);
+        enter.popupDir = KeyDef.DIR_NONE;
+        rows.add(row(sym, cls, comma, space, dot, enter));
 
         return rows;
     }
+
+    /* ---------------- default symbols ---------------- */
 
     public static List<List<KeyDef>> defaultSymbols() {
         List<List<KeyDef>> rows = new ArrayList<>();
 
-        rows.add(list(
-                ch("1", ""), ch("2", ""), ch("3", ""), ch("4", ""), ch("5", ""),
-                ch("6", ""), ch("7", ""), ch("8", ""), ch("9", ""), ch("0", "")));
+        rows.add(row(
+                ct("1", "1", sk("!"), 1f),
+                ct("2", "2", sk("@"), 1f),
+                ct("3", "3", sk("#"), 1f),
+                ct("4", "4", sk("$"), 1f),
+                ct("5", "5", sk("%"), 1f),
+                ct("6", "6", sk("^"), 1f),
+                ct("7", "7", sk("&"), 1f),
+                ct("8", "8", sk("*"), 1f),
+                ct("9", "9", sk("("), 1f),
+                ct("0", "0", sk(")"), 1f)));
 
-        rows.add(list(
-                ch("@", "«»"),
-                ch("#", ""),
-                ch("$", "€£¥¢"),
-                ch("_", ""),
-                ch("-", "–—"),
-                ch("+", ""),
-                ch("(", "["),
-                ch(")", "]"),
-                ch("/", "\\"),
-                ch("*", "")));
+        rows.add(row(
+                ct("\u20AC", "\u20AC", sk("$", "\u00A3", "\u00A5", "\u00A2"), 1f),
+                ct("_", "_", sk("-", "\u2013", "\u2014"), 1f),
+                ct(":", ":", sk(";"), 1f),
+                ct("'", "'", sk("\u2018", "\u2019"), 1f),
+                ct("\"", "\"", sk("\u201C", "\u201D"), 1f),
+                ct("/", "/", sk("\\"), 1f),
+                ct("?", "?", sk("\u00BF"), 1f),
+                ct("!", "!", sk("\u00A1"), 1f),
+                ct("<", "<", sk("\u2264", "\u00AB"), 1f),
+                ct(">", ">", sk("\u2265", "\u00BB"), 1f)));
 
-        KeyDef shift = special(KeyDef.KIND_SHIFT, "shift", "", 1.5f);
+        KeyDef shift = act(KeyDef.SHIFT, "shift", 1.6f);
         shift.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(shift);
-        KeyDef bs = special(KeyDef.KIND_BACKSPACE, "\u232B", "", 1.5f);
+        KeyDef bs = act(KeyDef.BACKSPACE, "backspace", 1.6f);
         bs.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(bs);
-        rows.add(list(
+        rows.add(row(
                 shift,
-                ch(":", ""), ch(";", ""), ch(",", ""), ch(".", ""),
-                ch("?", ""), ch("!", ""), ch("'", ""), ch("\"", ""),
+                ct("[", "[", sk("{"), 1f),
+                ct("]", "]", sk("}"), 1f),
+                ct("{", "{", sk("[", "("), 1f),
+                ct("}", "}", sk("]", ")"), 1f),
+                ct("(", "(", sk("["), 1f),
+                ct(")", ")", sk("]"), 1f),
+                ct("*", "*", sk("\u00D7"), 1f),
                 bs));
 
-        KeyDef abc = special(KeyDef.KIND_SYMBOLS, "ABC", "ABC", 1.4f);
+        KeyDef abc = act(KeyDef.SYMBOLS, "ABC", 1.5f);
         abc.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(abc);
-        KeyDef enter = special(KeyDef.KIND_ENTER, "\u23CE", "", 1.4f);
-        enter.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(enter);
-        KeyDef comma = ch(",", "");
-        comma.width = 1f;
-        KeyDef period = ch(".", "");
-        period.width = 1f;
-        KeyDef space = special(KeyDef.KIND_SPACE, "space", " ", 5.2f);
+        KeyDef comma = ct(",", ",", sk(";"), 1f);
+        KeyDef space = act(KeyDef.SPACE, "space", 4.6f);
         space.popupDir = KeyDef.DIR_NONE;
-        keyNoPopup(space);
-        rows.add(list(abc, comma, space, period, enter));
+        KeyDef dot = ct(".", ".", sk("!"), 1f);
+        KeyDef enter = act(KeyDef.ENTER, "enter", 1.5f);
+        enter.popupDir = KeyDef.DIR_NONE;
+        rows.add(row(abc, comma, space, dot, enter));
 
         return rows;
     }
 
-    private static void keyNoPopup(KeyDef k) {
-        k.popup = "";
-        k.popupEnabled = false;
-        k.popupDir = KeyDef.DIR_NONE;
+    /* ---------------- emoji page (fixed) ---------------- */
+
+    public static List<List<KeyDef>> emojiRows() {
+        String[][] groups = {
+                {"\uD83D\uDE00","\uD83D\uDE03","\uD83D\uDE04","\uD83D\uDE01","\uD83D\uDE06","\uD83D\uDE09","\uD83D\uDE0A","\uD83D\uDE0D"},
+                {"\uD83D\uDE17","\uD83D\uDE15","\uD83D\uDE22","\uD83D\uDE2D","\uD83D\uDE29","\uD83D\uDE12","\uD83D\uDE44","\uD83D\uDE37"},
+                {"\u2764\uFE0F","\uD83D\uDC93","\uD83D\uDC96","\uD83D\uDC97","\uD83D\uDC99","\uD83D\uDC9B","\uD83D\uDDA4","\uD83E\uDE79"},
+                {"\uD83D\uDC4D","\uD83D\uDC4E","\uD83D\uDC4F","\uD83D\uDCAF","\u270B","\uD83E\uDD1D","\uD83D\uDCAA","\uD83E\uDD1F"},
+                {"\uD83D\uDE80","\u2708\uFE0F","\uD83D\uDE95","\uD83C\uDF89","\uD83C\uDF81","\uD83C\uDF82","\uD83C\uDF93","\u2B50"},
+                {"\uD83D\uDE49","\uD83D\uDE48","\uD83D\uDE4A","\uD83D\uDD4A\uFE0F","\uD83D\uDE8E","\uD83C\uDF43","\uD83C\uDF38","\uD83C\uDF3B"},
+        };
+        List<List<KeyDef>> rows = new ArrayList<>();
+        for (String[] g : groups) {
+            List<KeyDef> r = new ArrayList<>();
+            for (String e : g) r.add(ct(e, e, null, 1f));
+            rows.add(r);
+        }
+        // bottom row: back + return to letters
+        KeyDef back = act(KeyDef.BACKSPACE, "backspace", 2f);
+        back.popupDir = KeyDef.DIR_NONE;
+        KeyDef abc = act(KeyDef.SYMBOLS, "ABC", 2f);
+        abc.popupDir = KeyDef.DIR_NONE;
+        KeyDef space = act(KeyDef.SPACE, "space", 4f);
+        space.popupDir = KeyDef.DIR_NONE;
+        rows.add(row(back, space, abc));
+        return rows;
     }
 
-    private static List<KeyDef> list(KeyDef... ks) {
-        List<KeyDef> l = new ArrayList<>();
-        for (KeyDef k : ks) l.add(k);
-        return l;
+    /* ---------------- tools ---------------- */
+
+    public static KeyDef digit(String d) {
+        return ct(d, d, null, 1f);
+    }
+
+    public static KeyDef arrow(KeyDef arrowKey, int kind) {
+        return act(kind, "", 1f);
     }
 
     /* ---------------- serialisation ---------------- */
@@ -179,7 +219,7 @@ public final class LayoutStore {
         return rows;
     }
 
-    /* ---------------- prefs access (layers: true = letters, false = symbols) ---------------- */
+    /* ---------------- prefs access ---------------- */
 
     public static List<List<KeyDef>> load(Context c, boolean letters) {
         Prefs p = new Prefs(c);

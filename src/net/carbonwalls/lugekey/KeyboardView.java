@@ -5,6 +5,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.text.TextPaint;
@@ -15,9 +16,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The LugeKey keyboard. Flat, minimal, Futo-style. The headline interaction:
- * swiping on a key in its configured direction (default: up) instantly opens that
- * key's extra-character popup — no long-press needed. Every key is user editable.
+ * LugeKey keyboard. FUTO-style minimal design + CleverKeys-style per-key
+ * customization: swiping a key opens an instant radial subkey popover (no
+ * long-press needed). Toolbar, number/arrow rows, hints and preview bubble
+ * are all toggleable from settings.
  */
 public class KeyboardView extends View {
 
@@ -25,41 +27,60 @@ public class KeyboardView extends View {
         void typeText(String text);
         void backspace();
         void enter();
+        void tab();
+        void deleteWord();
+        void undo();
+        void cursorLeft();
+        void cursorRight();
+        void home();
+        void end();
         void switchIme();
+        void openSettings();
+        void paste(String text);
     }
+
+    public static final int PAGE_ALPHA = 0;
+    public static final int PAGE_SYMBOLS = 1;
+    public static final int PAGE_EMOJI = 2;
 
     private final Prefs prefs;
     private final Handler handler = new Handler();
     private Listener listener;
-    private Theme ui;
 
+    private Theme.Palette pal;
     private List<List<KeyDef>> rows = new ArrayList<>();
     private final List<float[]> keyRects = new ArrayList<>(); // per row, 4 floats per key
-    private float rowHeight, gap, corner, padX, padTop, padBottom, fontScale;
+    private final List<Float> rowHeights = new ArrayList<>();
+    private float rowHeight, toolbarH, gap, corner, padX, padTop, padBottom, fontScale;
     private final float density;
 
-    // state
-    private boolean symbolsOn;
-    private int shiftState;       // 0 off, 1 one-shot, 2 caps lock
-    private long lastShiftPress = 0;
+    private int page = PAGE_ALPHA;
+    private int shiftState;          // 0 off, 1 once, 2 caps lock
+    private long lastShiftPress;
 
     // touch
     private boolean tracking;
     private KeyDef downKey;
     private int downRow = -1, downCol = -1;
     private float downX, downY;
+    private boolean consumeUp;
     private boolean longPressFired;
 
-    // popup fan
-    private boolean popupMode;
-    private boolean popupHorizontal;
-    private float popupPanelL, popupPanelT, popupPanelR, popupPanelB;
-    private float popupSlotW, popupSlotH, popupGap;
-    private final List<String> popupSlots = new ArrayList<>();
-    private final List<RectF> popupRects = new ArrayList<>();
-    private int popupSel = -1;
-    private float popupAnim = 1f;
-    private ValueAnimator popupAnimator;
+    // radial subkey popover
+    private boolean popover;
+    private List<String> popSlots = new ArrayList<>();
+    private final List<RectF> popRects = new ArrayList<>();
+    private float popCx, popCy, popRadius, popSlotSize;
+    private int popSel = -1;
+    private float popAnim = 1f;
+    private ValueAnimator popAnimator;
+
+    // clipboard panel
+    private boolean clipPanel;
+    private RectF clipPanelRect;
+    private final List<RectF> clipItemRects = new ArrayList<>();
+    private final List<String> clipItems = new ArrayList<>();
+    private RectF clipClearRect, clipCloseRect;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG);
@@ -74,39 +95,91 @@ public class KeyboardView extends View {
 
     public void setListener(Listener l) { listener = l; }
 
-    public int getRowCount() { return rows.size(); }
+    public int getPage() { return page; }
 
     public void resetState() {
         shiftState = 0;
-        symbolsOn = false;
-        cancelAll();
+        page = PAGE_ALPHA;
+        closeOverlays();
         rebuild();
     }
 
-    /** Reload layout + theme. Call after any settings/layout change. */
+    private void closeOverlays() {
+        popover = false;
+        clipPanel = false;
+        popSlots.clear();
+        popRects.clear();
+        clipItems.clear();
+        clipItemRects.clear();
+        cancelAll();
+    }
+
+    /* ---------------- layout ---------------- */
+
     public void rebuild() {
-        ui = Theme.load(getContext(), prefs);
+        pal = Theme.current(prefs);
         rowHeight = dp(prefs.heightDp());
+        toolbarH = rowHeight * 0.78f;
         gap = dp(2.5f);
-        corner = dp(8f);
+        corner = dp(9f);
         padX = dp(3f);
-        // A little reserved pocket above the top row so swipe-up gestures on the
-        // top row can travel before leaving the IME window.
-        padTop = dp(22f);
-        padBottom = dp(8f);
+        padTop = dp(14f);
+        padBottom = dp(6f);
         fontScale = prefs.fontPercent() / 100f;
-        List<List<KeyDef>> base = LayoutStore.load(getContext(), !symbolsOn);
-        List<List<KeyDef>> shown = new ArrayList<>();
-        for (List<KeyDef> r : base) shown.add(new ArrayList<>(r));
-        if (!symbolsOn && prefs.numberRow()) {
-            List<KeyDef> digits = new ArrayList<>();
-            for (int i = 1; i <= 9; i++) digits.add(new KeyDef(KeyDef.KIND_CHAR, "" + i, "" + i, "", 1f));
-            digits.add(new KeyDef(KeyDef.KIND_CHAR, "0", "0", "", 1f));
-            shown.add(0, digits);
+
+        rows = new ArrayList<>();
+        rowHeights.clear();
+        keyRects.clear();
+
+        if (page == PAGE_EMOJI) {
+            for (List<KeyDef> r : LayoutStore.emojiRows()) {
+                rows.add(r);
+                rowHeights.add(rowHeight);
+            }
+        } else {
+            boolean letters = page == PAGE_ALPHA;
+            List<List<KeyDef>> base = LayoutStore.load(getContext(), letters);
+            if (letters && prefs.toolbar()) {
+                List<KeyDef> tb = new ArrayList<>();
+                tb.add(act(KeyDef.CLIPBOARD, "\uD83D\uDCCB"));
+                tb.add(act(KeyDef.UNDO, "\u21A9"));
+                tb.add(act(KeyDef.EMOJI, "\uD83D\uDE00"));
+                tb.add(act(KeyDef.CURSOR_LEFT, "\u25C0"));
+                tb.add(act(KeyDef.CURSOR_RIGHT, "\u25B6"));
+                tb.add(act(KeyDef.SETTINGS, "\u2699"));
+                rows.add(tb);
+                rowHeights.add(toolbarH);
+            }
+            if (letters && prefs.arrowRow()) {
+                List<KeyDef> ar = new ArrayList<>();
+                ar.add(act(KeyDef.CURSOR_LEFT, "\u25C0"));
+                ar.add(act(KeyDef.HOME, "\u23EA"));
+                ar.add(act(KeyDef.END, "\u23E9"));
+                ar.add(act(KeyDef.CURSOR_RIGHT, "\u25B6"));
+                rows.add(ar);
+                rowHeights.add(rowHeight);
+            }
+            if (letters && prefs.numberRow()) {
+                List<KeyDef> nr = new ArrayList<>();
+                for (int i = 1; i <= 9; i++) nr.add(LayoutStore.digit("" + i));
+                nr.add(LayoutStore.digit("0"));
+                rows.add(nr);
+                rowHeights.add(rowHeight);
+            }
+            for (List<KeyDef> r : base) {
+                rows.add(new ArrayList<>(r));
+                rowHeights.add(rowHeight);
+            }
         }
-        rows = shown;
         relayout();
         invalidate();
+    }
+
+    private static KeyDef act(int kind, String label) {
+        KeyDef k = new KeyDef(kind, label, "", null, 1f);
+        k.popupDir = KeyDef.DIR_NONE;
+        k.id = (kind + label).hashCode();
+        return k;
     }
 
     private void relayout() {
@@ -114,25 +187,28 @@ public class KeyboardView extends View {
         float width = getWidth();
         if (width <= 0) return;
         float w = width - padX * 2f;
+        float y = padTop;
         for (int r = 0; r < rows.size(); r++) {
             List<KeyDef> row = rows.get(r);
+            float rh = r < rowHeights.size() ? rowHeights.get(r) : rowHeight;
             int n = row.size();
-            if (n == 0) continue;
-            float wt = 0f;
-            for (KeyDef k : row) wt += Math.max(0.05f, k.width);
-            float avail = w - gap * (n - 1);
-            float[] arr = new float[n * 4];
-            float x = padX;
-            float top = padTop + r * (rowHeight + gap);
-            for (int i = 0; i < n; i++) {
-                float kw = avail * Math.max(0.05f, row.get(i).width) / wt;
-                arr[i * 4] = x;
-                arr[i * 4 + 1] = top;
-                arr[i * 4 + 2] = x + kw;
-                arr[i * 4 + 3] = top + rowHeight;
-                x += kw + gap;
+            float[] arr = new float[Math.max(0, n * 4)];
+            if (n > 0) {
+                float wt = 0f;
+                for (KeyDef k : row) wt += Math.max(0.05f, k.width);
+                float avail = w - gap * (n - 1);
+                float x = padX;
+                for (int i = 0; i < n; i++) {
+                    float kw = avail * Math.max(0.05f, row.get(i).width) / wt;
+                    arr[i * 4] = x;
+                    arr[i * 4 + 1] = y;
+                    arr[i * 4 + 2] = x + kw;
+                    arr[i * 4 + 3] = y + rh;
+                    x += kw + gap;
+                }
             }
             keyRects.add(arr);
+            y += rh + gap;
         }
     }
 
@@ -145,7 +221,11 @@ public class KeyboardView extends View {
         switch (ev.getActionMasked()) {
             case MotionEvent.ACTION_DOWN: {
                 downRow = -1; downCol = -1; downKey = null; tracking = false;
-                longPressFired = false;
+                consumeUp = false; longPressFired = false;
+                if (clipPanel) {
+                    handleClipDown(ev.getX(), ev.getY());
+                    return true;
+                }
                 int[] hit = findKey(ev.getX(), ev.getY());
                 if (hit != null) {
                     downRow = hit[0]; downCol = hit[1];
@@ -153,40 +233,46 @@ public class KeyboardView extends View {
                     downX = ev.getX(); downY = ev.getY();
                     tracking = true;
                     Fx.click(getContext(), prefs, this);
-                    if (downKey.kind == KeyDef.KIND_BACKSPACE) {
+                    if (downKey.kind == KeyDef.BACKSPACE) {
                         handler.removeCallbacks(repeatRunnable);
                         handler.postDelayed(repeatRunnable, 420);
                     }
-                    handler.removeCallbacks(longPressRunnable);
-                    handler.postDelayed(longPressRunnable, 500);
-                    popupMode = false;
+                    if (prefs.longPressPopup()) {
+                        handler.removeCallbacks(longPressRunnable);
+                        handler.postDelayed(longPressRunnable, 480);
+                    }
                     invalidate();
                 }
                 return true;
             }
             case MotionEvent.ACTION_MOVE: {
                 if (!tracking) return true;
-                if (popupMode) {
-                    popupSel = selectSlot(ev.getX(), ev.getY());
+                if (popover) {
+                    updatePopSel(ev.getX(), ev.getY());
                     invalidate();
                     return true;
                 }
-                if (!longPressFired) {
+                if (!longPressFired && downKey != null) {
                     float dx = ev.getX() - downX;
                     float dy = ev.getY() - downY;
-                    boolean tr = swipeTriggered(downKey, dx, dy);
-                    if (tr) {
-                        tryEnterPopup(downKey, false);
+                    if (downKey.kind == KeyDef.BACKSPACE
+                            && dx <= -dp(18f) && Math.abs(dx) > Math.abs(dy) * 1.2f) {
+                        if (listener != null) listener.deleteWord();
+                        consumeUp = true;
+                    } else if (swipeTriggered(downKey, dx, dy) && downKey.hasSubkeys()) {
+                        enterPopover(downKey);
                     }
                 }
                 return true;
             }
             case MotionEvent.ACTION_UP: {
                 if (!tracking) return true;
-                float x = ev.getX(), y = ev.getY();
-                if (popupMode) {
-                    int sel = selectSlot(x, y);
-                    if (sel >= 0) commitPopupSlot(sel);
+                if (popover) {
+                    if (popSel >= 0 && popSel < popSlots.size()) {
+                        commit(popSlots.get(popSel));
+                    }
+                } else if (consumeUp) {
+                    // swipe on backspace already handled
                 } else if (downKey != null && !longPressFired) {
                     pressKey(downKey);
                 }
@@ -203,13 +289,14 @@ public class KeyboardView extends View {
 
     private void cleanup() {
         tracking = false;
+        consumeUp = false;
         longPressFired = false;
-        popupMode = false;
-        popupSlots.clear();
-        popupRects.clear();
-        popupSel = -1;
-        popupAnim = 1f;
-        if (popupAnimator != null) { popupAnimator.cancel(); popupAnimator = null; }
+        popover = false;
+        popSlots.clear();
+        popRects.clear();
+        popSel = -1;
+        popAnim = 1f;
+        if (popAnimator != null) { popAnimator.cancel(); popAnimator = null; }
         cancelAll();
         downKey = null;
         invalidate();
@@ -222,7 +309,8 @@ public class KeyboardView extends View {
 
     private final Runnable repeatRunnable = new Runnable() {
         @Override public void run() {
-            if (tracking && downKey != null && downKey.kind == KeyDef.KIND_BACKSPACE && !popupMode) {
+            if (tracking && downKey != null && downKey.kind == KeyDef.BACKSPACE
+                    && !popover && !clipPanel && !consumeUp) {
                 if (listener != null) listener.backspace();
                 Fx.click(getContext(), prefs, KeyboardView.this);
                 handler.postDelayed(this, 55);
@@ -232,10 +320,8 @@ public class KeyboardView extends View {
 
     private final Runnable longPressRunnable = new Runnable() {
         @Override public void run() {
-            if (tracking && downKey != null && !popupMode) {
-                if (prefs.longPressPopup() && tryEnterPopup(downKey, true)) {
-                    longPressFired = true;
-                }
+            if (tracking && downKey != null && !popover && downKey.hasSubkeys()) {
+                if (enterPopover(downKey)) longPressFired = true;
             }
         }
     };
@@ -243,10 +329,8 @@ public class KeyboardView extends View {
     private int[] findKey(float x, float y) {
         for (int r = 0; r < keyRects.size(); r++) {
             float[] a = keyRects.get(r);
-            for (int i = 0; i < a.length / 4; i++) {
-                if (x >= a[i * 4] && x <= a[i * 4 + 2] && y >= a[i * 4 + 1] && y <= a[i * 4 + 3]) {
-                    return new int[]{r, i};
-                }
+            for (int i = 0; i + 3 < a.length; i += 4) {
+                if (x >= a[i] && x <= a[i + 2] && y >= a[i + 1] && y <= a[i + 3]) return new int[]{r, i / 4};
             }
         }
         return null;
@@ -255,170 +339,13 @@ public class KeyboardView extends View {
     private boolean swipeTriggered(KeyDef k, float dx, float dy) {
         if (k == null) return false;
         String d = k.popupDir == null ? KeyDef.DIR_NONE : k.popupDir;
-        float th = dp(16);
+        float th = dp(15f);
         switch (d) {
-            case KeyDef.DIR_UP:
-                return -dy >= th && Math.abs(dy) > Math.abs(dx);
-            case KeyDef.DIR_DOWN:
-                return dy >= th && Math.abs(dy) > Math.abs(dx);
-            case KeyDef.DIR_LEFT:
-                return -dx >= th && Math.abs(dx) > Math.abs(dy);
-            case KeyDef.DIR_RIGHT:
-                return dx >= th && Math.abs(dx) > Math.abs(dy);
-            default:
-                return false;
-        }
-    }
-
-    /* ---------------- popup fan ---------------- */
-
-    private boolean tryEnterPopup(KeyDef k, boolean fromLongPress) {
-        if (k == null || !k.popupEnabled) return false;
-        if (k.popup == null || k.popup.isEmpty()) return false;
-
-        popupSlots.clear();
-        popupSlots.add(displayLabel(k)); // base slot index 0
-        int added = 0;
-        String p = k.popup;
-        int cpCount = p.codePointCount(0, p.length());
-        for (int i = 0; i < cpCount && popupSlots.size() < 12; i++) {
-            int cp = p.codePointAt(p.offsetByCodePoints(0, i));
-            popupSlots.add(new String(Character.toChars(cp)));
-            added++;
-        }
-        if (added == 0) return false;
-
-        layoutPopup(k);
-        popupSel = 0;
-        popupMode = true;
-        popupAnim = 0f;
-        cancelAll();
-        if (popupAnimator != null) popupAnimator.cancel();
-        popupAnimator = ValueAnimator.ofFloat(0f, 1f);
-        popupAnimator.setDuration(130);
-        popupAnimator.addUpdateListener(a -> { popupAnim = (Float) a.getAnimatedValue(); invalidate(); });
-        popupAnimator.start();
-        invalidate();
-        return true;
-    }
-
-    private void layoutPopup(KeyDef k) {
-        popupRects.clear();
-        int n = popupSlots.size();
-        float[] a = keyRects.get(downRow);
-        float kL = a[downCol * 4], kT = a[downCol * 4 + 1];
-        float kR = a[downCol * 4 + 2], kB = a[downCol * 4 + 3];
-        float kCx = (kL + kR) / 2f, kCy = (kT + kB) / 2f;
-        String d = k.popupDir == null ? KeyDef.DIR_NONE : k.popupDir;
-        boolean horizontal = d.equals(KeyDef.DIR_UP) || d.equals(KeyDef.DIR_DOWN);
-        popupHorizontal = horizontal;
-
-        if (horizontal) {
-            popupSlotH = rowHeight * 1.18f;
-            popupGap = dp(2f);
-            float availW = getWidth() - padX * 2 - dp(4);
-            popupSlotW = Math.max(dp(34), Math.min(dp(52), Math.min(availW, dp(52) * n + popupGap * (n - 1)) / Math.max(1, n)));
-            float[] centers = fanCenters(kCx, n);
-            // Anchoring: keep the base slot (index 0) centred on the key when possible.
-            float minL = Float.MAX_VALUE, maxR = -Float.MAX_VALUE;
-            for (int i = 0; i < n; i++) {
-                minL = Math.min(minL, centers[i] - popupSlotW / 2f);
-                maxR = Math.max(maxR, centers[i] + popupSlotW / 2f);
-            }
-            float leftExtent = kCx - minL, rightExtent = maxR - kCx;
-            float baseCenter = clamp(kCx, padX + leftExtent, getWidth() - padX - rightExtent);
-            float left = baseCenter - leftExtent;
-            popupPanelL = left;
-            popupPanelR = left + (maxR - minL);
-            if (d.equals(KeyDef.DIR_DOWN)) {
-                popupPanelT = clamp(kB + dp(2), padTop, getHeight() - padBottom - popupSlotH);
-            } else {
-                popupPanelT = clamp(kT - popupSlotH - dp(2), padTop, getHeight() - padBottom - popupSlotH);
-            }
-            popupPanelB = popupPanelT + popupSlotH;
-            for (int i = 0; i < n; i++) {
-                float l = left + (centers[i] - minL);
-                popupRects.add(new RectF(l, popupPanelT, l + popupSlotW, popupPanelB));
-            }
-        } else {
-            popupSlotW = rowHeight * 1.25f;
-            popupGap = dp(2f);
-            float maxH = getHeight() - padTop - padBottom - dp(2);
-            popupSlotH = Math.max(dp(30), Math.min(dp(42), (maxH - popupGap * (n - 1)) / Math.max(1, n)));
-            float[] centers = fanCenters(kCy, n);
-            float minT = Float.MAX_VALUE, maxB = -Float.MAX_VALUE;
-            for (int i = 0; i < n; i++) {
-                minT = Math.min(minT, centers[i] - popupSlotH / 2f);
-                maxB = Math.max(maxB, centers[i] + popupSlotH / 2f);
-            }
-            float topExtent = kCy - minT, bottomExtent = maxB - kCy;
-            float baseCenter = clamp(kCy, padTop + topExtent, getHeight() - padBottom - bottomExtent);
-            float top = baseCenter - topExtent;
-            float cx = d.equals(KeyDef.DIR_LEFT) ? clamp(kL - popupSlotW - dp(2), padX, getWidth() - popupSlotW - padX)
-                                                 : clamp(kR + dp(2), padX, getWidth() - popupSlotW - padX);
-            popupPanelL = cx; popupPanelR = cx + popupSlotW;
-            popupPanelT = top; popupPanelB = top + (maxB - minT);
-            for (int i = 0; i < n; i++) {
-                float t = top + (centers[i] - minT);
-                popupRects.add(new RectF(cx, t, cx + popupSlotW, t + popupSlotH));
-            }
-        }
-    }
-
-    /** Centers for n slots with index 0 at `origin`, then extras alternating left/right (or up/down). */
-    private float[] fanCenters(float origin, int n) {
-        float[] c = new float[n];
-        float pitch = 0f;
-        if (popupHorizontal) pitch = popupSlotW + popupGap; else pitch = popupSlotH + popupGap;
-        c[0] = origin;
-        int side = 1; // 1 = left, -1 = right
-        int step = 1;
-        for (int i = 1; i < n; i++) {
-            c[i] = origin + side * step * pitch;
-            side = -side;
-            if (side == 1) step++;
-        }
-        return c;
-    }
-
-    private int selectSlot(float x, float y) {
-        if (popupRects.isEmpty()) return -1;
-        if (popupHorizontal) {
-            // generously snap along the fan, but back out if the finger dives well
-            // below the panel (towards the keyboard bottom) or flies far above it
-            float above = popupPanelT - popupSlotH * 2.2f;
-            float below = popupPanelB + popupSlotH * 2.2f;
-            if (y < above || y > below) return -1;
-            return nearestByIndex(x, true);
-        } else {
-            float left = popupPanelL - popupSlotW * 2.2f;
-            float right = popupPanelR + popupSlotW * 2.2f;
-            if (x < left || x > right) return -1;
-            return nearestByIndex(y, false);
-        }
-    }
-
-    private int nearestByIndex(float v, boolean byX) {
-        float best = Float.MAX_VALUE;
-        int bi = -1;
-        for (int i = 0; i < popupRects.size(); i++) {
-            RectF r = popupRects.get(i);
-            float c = byX ? r.centerX() : r.centerY();
-            float dd = Math.abs(v - c);
-            if (dd < best) { best = dd; bi = i; }
-        }
-        return bi;
-    }
-
-    private void commitPopupSlot(int sel) {
-        if (downKey == null) return;
-        if (sel == 0) {
-            pressKey(downKey);
-        } else if (sel < popupSlots.size()) {
-            String s = popupSlots.get(sel);
-            if (s != null && !s.isEmpty() && listener != null) listener.typeText(s);
-            afterType(s);
-            Fx.click(getContext(), prefs, this);
+            case KeyDef.DIR_UP:    return -dy >= th && Math.abs(dy) > Math.abs(dx);
+            case KeyDef.DIR_DOWN:  return  dy >= th && Math.abs(dy) > Math.abs(dx);
+            case KeyDef.DIR_LEFT:  return -dx >= th && Math.abs(dx) > Math.abs(dy);
+            case KeyDef.DIR_RIGHT: return  dx >= th && Math.abs(dx) > Math.abs(dy);
+            default: return false;
         }
     }
 
@@ -428,54 +355,59 @@ public class KeyboardView extends View {
         if (k == null) return;
         Fx.click(getContext(), prefs, this);
         switch (k.kind) {
-            case KeyDef.KIND_CHAR: {
-                String out = k.output == null ? k.label : k.output;
+            case KeyDef.CONTENT: {
+                String out = k.output == null ? "" : k.output;
                 if (out.isEmpty()) out = k.label;
                 if (shiftState != 0 && out.length() == 1) {
                     out = String.valueOf(Character.toUpperCase(out.charAt(0)));
                 }
-                if (listener != null) listener.typeText(out);
-                afterType(out);
+                commit(out);
                 break;
             }
-            case KeyDef.KIND_SPACE:
-                if (listener != null) listener.typeText(" ");
-                afterType(" ");
-                break;
-            case KeyDef.KIND_TAB:
-                if (listener != null) listener.typeText("\t");
-                afterType("\t");
-                break;
-            case KeyDef.KIND_BACKSPACE:
-                if (listener != null) listener.backspace();
-                break;
-            case KeyDef.KIND_ENTER:
+            case KeyDef.SPACE: commit(" "); break;
+            case KeyDef.TAB: commit("\t"); break;
+            case KeyDef.BACKSPACE: if (listener != null) listener.backspace(); break;
+            case KeyDef.ENTER:
                 if (listener != null) listener.enter();
                 shiftState = 0;
                 invalidate();
                 break;
-            case KeyDef.KIND_SHIFT: {
+            case KeyDef.SHIFT: {
                 long now = SystemClock.uptimeMillis();
-                if (shiftState == 2) {
-                    shiftState = 0;
-                } else if (shiftState == 1 && now - lastShiftPress < 450) {
-                    shiftState = 2; // caps lock
-                } else {
-                    shiftState = 1;
-                }
+                if (shiftState == 2) shiftState = 0;
+                else if (shiftState == 1 && now - lastShiftPress < 450) shiftState = 2;
+                else shiftState = 1;
                 lastShiftPress = now;
                 invalidate();
                 break;
             }
-            case KeyDef.KIND_SYMBOLS:
-                symbolsOn = !symbolsOn;
+            case KeyDef.SYMBOLS:
+                page = (page == PAGE_ALPHA) ? PAGE_SYMBOLS : PAGE_ALPHA;
                 shiftState = 0;
                 rebuild();
                 break;
-            case KeyDef.KIND_SWITCH:
-                if (listener != null) listener.switchIme();
+            case KeyDef.EMOJI:
+                page = (page == PAGE_EMOJI) ? PAGE_ALPHA : PAGE_EMOJI;
+                shiftState = 0;
+                rebuild();
                 break;
+            case KeyDef.SWITCH_IME: if (listener != null) listener.switchIme(); break;
+            case KeyDef.DELETE_WORD: if (listener != null) listener.deleteWord(); break;
+            case KeyDef.UNDO: if (listener != null) listener.undo(); break;
+            case KeyDef.CURSOR_LEFT: if (listener != null) listener.cursorLeft(); break;
+            case KeyDef.CURSOR_RIGHT: if (listener != null) listener.cursorRight(); break;
+            case KeyDef.HOME: if (listener != null) listener.home(); break;
+            case KeyDef.END: if (listener != null) listener.end(); break;
+            case KeyDef.CLIPBOARD: openClipPanel(); break;
+            case KeyDef.SETTINGS: if (listener != null) listener.openSettings(); break;
         }
+    }
+
+    /** Single funnel for everything that inserts text (keys, popover, clipboard). */
+    private void commit(String s) {
+        if (s == null || s.isEmpty()) return;
+        if (listener != null) listener.typeText(s);
+        afterType(s);
         invalidate();
     }
 
@@ -485,11 +417,10 @@ public class KeyboardView extends View {
             char c = s.charAt(0);
             if (c == '.' || c == '?' || c == '!' || c == ':') shiftState = 1;
         }
-        invalidate();
     }
 
     private String displayLabel(KeyDef k) {
-        if (k.kind == KeyDef.KIND_CHAR && shiftState != 0) {
+        if (k.kind == KeyDef.CONTENT && shiftState != 0) {
             if (k.label != null && k.label.length() == 1) {
                 char u = Character.toUpperCase(k.label.charAt(0));
                 if (u != k.label.charAt(0)) return String.valueOf(u);
@@ -498,8 +429,109 @@ public class KeyboardView extends View {
         return k.label == null ? "" : k.label;
     }
 
-    private float clamp(float v, float lo, float hi) {
-        return Math.max(lo, Math.min(hi, v));
+    /* ---------------- radial subkey popover ---------------- */
+
+    private boolean enterPopover(KeyDef k) {
+        popSlots.clear();
+        for (String s : k.subkeys) {
+            if (s != null && !s.isEmpty()) popSlots.add(s);
+            if (popSlots.size() >= 8) break;
+        }
+        if (popSlots.isEmpty()) return false;
+
+        float[] a = keyRects.get(downRow);
+        float kL = a[downCol * 4], kT = a[downCol * 4 + 1];
+        float kR = a[downCol * 4 + 2], kB = a[downCol * 4 + 3];
+        popCx = (kL + kR) / 2f;
+        popCy = (kT + kB) / 2f;
+        popSlotSize = Math.max(dp(44f), rowHeight * 0.92f);
+        popRadius = rowHeight * 1.55f;
+
+        popRects.clear();
+        for (int i = 0; i < popSlots.size(); i++) {
+            float a0 = (float) (Math.PI / 4f * i - Math.PI / 2f); // N, NE, E, SE, S, SW, W, NW
+            float cx = popCx + popRadius * (float) Math.cos(a0);
+            float cy = popCy + popRadius * (float) Math.sin(a0);
+            popRects.add(new RectF(cx - popSlotSize / 2f, cy - popSlotSize / 2f,
+                    cx + popSlotSize / 2f, cy + popSlotSize / 2f));
+        }
+        popSel = -1;
+        popover = true;
+        cancelAll();
+        popAnim = 0f;
+        if (popAnimator != null) popAnimator.cancel();
+        popAnimator = ValueAnimator.ofFloat(0f, 1f);
+        popAnimator.setDuration(140);
+        popAnimator.addUpdateListener(a2 -> { popAnim = (Float) a2.getAnimatedValue(); invalidate(); });
+        popAnimator.start();
+        invalidate();
+        return true;
+    }
+
+    private void updatePopSel(float x, float y) {
+        float dx = x - popCx, dy = y - popCy;
+        float dist = (float) Math.hypot(dx, dy);
+        if (dist < popRadius * 0.5f || popSlots.isEmpty()) {
+            popSel = -1;
+            return;
+        }
+        float best = popRadius * 2f;
+        int bi = -1;
+        for (int i = 0; i < popRects.size(); i++) {
+            RectF r = popRects.get(i);
+            float d = (float) Math.hypot(x - r.centerX(), y - r.centerY());
+            if (d < best) { best = d; bi = i; }
+        }
+        popSel = (best <= popSlotSize * 1.15f) ? bi : -1;
+    }
+
+    /* ---------------- clipboard panel ---------------- */
+
+    private void openClipPanel() {
+        clipItems.clear();
+        for (String s : ClipboardHistory.load(getContext())) {
+            clipItems.add(s);
+            if (clipItems.size() >= 8) break;
+        }
+        float w = getWidth() - dp(24f);
+        float h = dp(36f) + clipItems.size() * dp(46f) + dp(72f);
+        h = Math.min(h, getHeight() * 0.85f);
+        float l = (getWidth() - w) / 2f;
+        float t = (getHeight() - h) / 2f;
+        clipPanelRect = new RectF(l, t, l + w, t + h);
+        clipItemRects.clear();
+        float y = t + dp(34f);
+        for (int i = 0; i < clipItems.size(); i++) {
+            clipItemRects.add(new RectF(l + dp(10f), y, l + w - dp(10f), y + dp(42f)));
+            y += dp(46f);
+        }
+        clipClearRect = new RectF(clipPanelRect.left + dp(12f), clipPanelRect.bottom - dp(50f),
+                clipPanelRect.left + dp(90f), clipPanelRect.bottom - dp(12f));
+        clipCloseRect = new RectF(clipPanelRect.right - dp(90f), clipPanelRect.bottom - dp(50f),
+                clipPanelRect.right - dp(12f), clipPanelRect.bottom - dp(12f));
+        clipPanel = true;
+        cancelAll();
+        invalidate();
+    }
+
+    private void handleClipDown(float x, float y) {
+        for (int i = 0; i < clipItemRects.size(); i++) {
+            if (clipItemRects.get(i).contains(x, y)) {
+                if (listener != null) listener.paste(clipItems.get(i));
+                clipPanel = false;
+                invalidate();
+                return;
+            }
+        }
+        if (clipClearRect != null && clipClearRect.contains(x, y)) {
+            ClipboardHistory.clear(getContext());
+            openClipPanel();
+            return;
+        }
+        if (clipCloseRect != null && clipCloseRect.contains(x, y)) {
+            clipPanel = false;
+            invalidate();
+        }
     }
 
     /* ---------------- drawing ---------------- */
@@ -507,8 +539,12 @@ public class KeyboardView extends View {
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         int w = MeasureSpec.getSize(widthMeasureSpec);
-        int h = Math.round(padTop + padBottom + rows.size() * rowHeight + Math.max(0, rows.size() - 1) * gap);
-        setMeasuredDimension(w, h);
+        float h = padTop + padBottom;
+        for (int i = 0; i < rowHeights.size(); i++) {
+            h += rowHeights.get(i);
+            if (i + 1 < rowHeights.size()) h += gap;
+        }
+        setMeasuredDimension(w, Math.round(h));
     }
 
     @Override
@@ -519,122 +555,165 @@ public class KeyboardView extends View {
 
     @Override
     protected void onDraw(Canvas c) {
-        if (ui == null) return;
-        c.drawColor(ui.bg);
-        paint.setStyle(Paint.Style.FILL);
+        if (pal == null) return;
+        c.drawColor(pal.bg);
 
-        for (int r = 0; r < keyRects.size(); r++) {
+        int n = rows.size();
+        for (int r = 0; r < n; r++) {
             float[] a = keyRects.get(r);
             List<KeyDef> row = rows.get(r);
-            for (int i = 0; i < row.size(); i++) {
+            for (int i = 0; i * 4 + 3 < a.length; i++) {
                 KeyDef k = row.get(i);
-                float l = a[i * 4], t = a[i * 4 + 1], rr = a[i * 4 + 2], b = a[i * 4 + 3];
-                paint.setColor(keyColor(k, r, i));
-                RectF rect = new RectF(l, t, rr, b);
-                c.drawRoundRect(rect, corner, corner, paint);
-
-                // subtle border
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(1));
-                paint.setColor(ui.keyBorder);
-                c.drawRoundRect(rect, corner, corner, paint);
-                paint.setStyle(Paint.Style.FILL);
-
-                drawHintDot(c, k, rr, t);
-                drawKeyLabel(c, k, rect);
+                RectF rect = new RectF(a[i * 4], a[i * 4 + 1], a[i * 4 + 2], a[i * 4 + 3]);
+                drawKey(c, k, rect, r, i);
             }
         }
 
-        if (popupMode && !popupRects.isEmpty()) {
-            // scrim
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(ui.scrim);
-            c.drawRect(0, 0, getWidth(), getHeight(), paint);
+        if (popover && !popRects.isEmpty()) drawPopover(c);
+        if (clipPanel && clipPanelRect != null) drawClipPanel(c);
+    }
 
-            // panel backdrop
-            float p = popupAnim;
-            RectF panel = new RectF(popupPanelL, popupPanelT, popupPanelR, popupPanelB);
-            if (p < 1f) {
-                float cx = panel.centerX(), cy = panel.centerY();
-                float s = 0.7f + 0.3f * p;
-                RectF grow = new RectF(cx - (cx - panel.left) * s, cy - (cy - panel.top) * s,
-                        cx + (panel.right - cx) * s, cy + (panel.bottom - cy) * s);
-                panel = grow;
-            }
-            paint.setColor(ui.dark ? 0xFF1E1F26 : 0xFFFFFFFF);
-            c.drawRoundRect(panel, dp(10), dp(10), paint);
+    private void drawKey(Canvas c, KeyDef k, RectF rect, int r, int i) {
+        boolean pressed = isDown(r, i);
+        boolean shiftKey = k.kind == KeyDef.SHIFT && shiftState != 0;
+        int fill;
+        if (shiftKey) fill = pal.accent;
+        else if (pressed) fill = k.isSpecial() ? pal.funcPressed() : pal.pressed;
+        else fill = k.isSpecial() ? pal.keyFunc : pal.key;
 
-            // slots
-            for (int i = 0; i < popupRects.size(); i++) {
-                RectF sr = popupRects.get(i);
-                RectF dr = scaleRect(sr, panel);
-                boolean sel = (i == popupSel);
-                paint.setColor(sel ? ui.accent : (ui.dark ? 0xFF2A2B33 : 0xFFF0F1F5));
-                c.drawRoundRect(dr, dp(7), dp(7), paint);
-                tp.setColor(sel ? 0xFFFFFFFF : ui.text);
-                tp.setTextSize(sp(15) * fontScale);
-                tp.setTypeface(ui.bold());
-                tp.setTextAlign(Paint.Align.CENTER);
-                String s = popupSlots.get(i);
-                Paint.FontMetrics fm = tp.getFontMetrics();
-                float baseline = dr.centerY() - (fm.ascent + fm.descent) / 2f;
-                c.drawText(s, dr.centerX(), baseline, tp);
+        paint.setColor(fill);
+        c.drawRoundRect(rect, corner, corner, paint);
+
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(pal.keyBorder);
+        c.drawRoundRect(rect, corner, corner, paint);
+        paint.setStyle(Paint.Style.FILL);
+
+        // symbol hint (first subkey) at top-right
+        if (prefs.hints() && k.kind == KeyDef.CONTENT && !pressed && shiftState == 0) {
+            String h = k.firstSubkey();
+            if (h != null) {
+                tp.setColor(pal.hint);
+                tp.setTextSize(sp(9f) * fontScale);
+                tp.setTextAlign(Paint.Align.RIGHT);
+                String hs = h.length() > 2 ? h.substring(0, 2) : h;
+                c.drawText(hs, rect.right - dp(6f), rect.top + dp(12f), tp);
             }
         }
-    }
 
-    private RectF scaleRect(RectF src, RectF panel) {
-        return new RectF(panel.left + (src.left - popupPanelL), panel.top + (src.top - popupPanelT),
-                panel.right + (src.right - popupPanelR), panel.bottom + (src.bottom - popupPanelB));
-    }
-
-    private int keyColor(KeyDef k, int r, int i) {
-        if (downKey == k && tracking && !popupMode) {
-            if (k.kind == KeyDef.KIND_SHIFT && (shiftState == 2)) return ui.accent;
-            return ui.keyPressed;
-        }
-        if (k.kind == KeyDef.KIND_SHIFT && shiftState != 0) return ui.accent;
-        if (k.isSpecial()) return ui.keyFunc;
-        return ui.key;
-    }
-
-    private void drawHintDot(Canvas c, KeyDef k, float right, float top) {
-        if (k.popupEnabled && k.popup != null && !k.popup.isEmpty() && !popupMode && !k.isSpecial()) {
-            float r = dp(2.2f);
-            paint.setColor((ui.accent & 0x00FFFFFF) | 0xB0000000);
-            paint.setAlpha(170);
-            c.drawCircle(right - dp(7), top + dp(7), r, paint);
-            paint.setAlpha(255);
-        }
-    }
-
-    private String specialGlyph(KeyDef k) {
-        switch (k.kind) {
-            case KeyDef.KIND_SHIFT: return "\u21E7";
-            case KeyDef.KIND_BACKSPACE: return "\u232B";
-            case KeyDef.KIND_ENTER: return "\u23CE";
-            default: return null;
-        }
-    }
-
-    private void drawKeyLabel(Canvas c, KeyDef k, RectF rect) {
-        if (k.kind == KeyDef.KIND_SPACE) return;
-        String text;
-        String glyph = specialGlyph(k);
-        if (glyph != null) {
-            text = glyph;
-            tp.setColor(shiftState != 0 && k.kind == KeyDef.KIND_SHIFT ? 0xFFFFFFFF : ui.textFunc);
-            tp.setTextSize(sp(16) * fontScale);
-        } else {
-            text = displayLabel(k);
-            tp.setColor(k.kind == KeyDef.KIND_CHAR ? ui.text : ui.textFunc);
-            tp.setTextSize(sp(15) * fontScale);
-        }
-        tp.setTypeface(ui.bold());
+        String label = keyText(k);
+        tp.setColor(shiftKey ? 0xFFFFFFFF : (k.isSpecial() ? pal.textFunc : pal.text));
+        tp.setTextSize(sp(k.isSpecial() ? 14f : 16f) * fontScale);
+        tp.setTypeface(Typeface.DEFAULT_BOLD);
         tp.setTextAlign(Paint.Align.CENTER);
         Paint.FontMetrics fm = tp.getFontMetrics();
-        float baseline = rect.centerY() - (fm.ascent + fm.descent) / 2f;
-        c.drawText(text, rect.centerX(), baseline, tp);
+        c.drawText(label, rect.centerX(), rect.centerY() - (fm.ascent + fm.descent) / 2f, tp);
+    }
+
+    private boolean isDown(int r, int i) {
+        return tracking && downRow == r && downCol == i && !popover && !clipPanel;
+    }
+
+    private String keyText(KeyDef k) {
+        switch (k.kind) {
+            case KeyDef.SHIFT: return shiftState == 2 ? "\u21EA" : "\u21E7";
+            case KeyDef.BACKSPACE: return "\u232B";
+            case KeyDef.ENTER: return "\u23CE";
+            case KeyDef.TAB: return "\u21E5";
+            case KeyDef.SYMBOLS: {
+                String l = displayLabel(k);
+                return l.isEmpty() ? "?123" : l;
+            }
+            default: {
+                String l = displayLabel(k);
+                return l.isEmpty() ? "\u00B7" : l;
+            }
+        }
+    }
+
+    private void drawPopover(Canvas c) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(pal.dark ? 0xB3000000 : 0x66000000);
+        c.drawRect(0, 0, getWidth(), getHeight(), paint);
+
+        float s = popAnim;
+        RectF mid = new RectF(popCx - popSlotSize / 2f * s, popCy - popSlotSize / 2f * s,
+                popCx + popSlotSize / 2f * s, popCy + popSlotSize / 2f * s);
+        paint.setColor(pal.dark ? 0xFF1E1F26 : 0xFFFFFFFF);
+        c.drawRoundRect(mid, dp(9f), dp(9f), paint);
+        if (downKey != null) {
+            tp.setColor(pal.text);
+            tp.setTextSize(sp(16f) * fontScale);
+            tp.setTextAlign(Paint.Align.CENTER);
+            tp.setTypeface(Typeface.DEFAULT_BOLD);
+            Paint.FontMetrics fm = tp.getFontMetrics();
+            c.drawText(downKey.label, popCx, popCy - (fm.ascent + fm.descent) / 2f, tp);
+        }
+
+        for (int i = 0; i < popRects.size(); i++) {
+            RectF base = popRects.get(i);
+            RectF tile = new RectF(
+                    popCx + (base.left - popCx) * s, popCy + (base.top - popCy) * s,
+                    popCx + (base.right - popCx) * s, popCy + (base.bottom - popCy) * s);
+            boolean sel = (i == popSel);
+            paint.setColor(sel ? pal.accent : (pal.dark ? 0xFF23242B : 0xFFFFFFFF));
+            c.drawRoundRect(tile, dp(9f), dp(9f), paint);
+            tp.setColor(sel ? 0xFFFFFFFF : pal.text);
+            tp.setTextSize(sp(15f) * fontScale);
+            tp.setTextAlign(Paint.Align.CENTER);
+            tp.setTypeface(Typeface.DEFAULT);
+            String txt = popSlots.get(i);
+            String shown = txt.substring(0, Math.min(txt.length(), 6));
+            if (txt.length() > 6) shown += "\u2026";
+            Paint.FontMetrics fm = tp.getFontMetrics();
+            c.drawText(shown, tile.centerX(), tile.centerY() - (fm.ascent + fm.descent) / 2f, tp);
+        }
+    }
+
+    private void drawClipPanel(Canvas c) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(pal.dark ? 0xCC000000 : 0x66000000);
+        c.drawRect(0, 0, getWidth(), getHeight(), paint);
+
+        paint.setColor(pal.dark ? 0xFF1C1D24 : 0xFFFFFFFF);
+        c.drawRoundRect(clipPanelRect, dp(14f), dp(14f), paint);
+
+        tp.setColor(pal.text);
+        tp.setTextSize(sp(14f));
+        tp.setTextAlign(Paint.Align.LEFT);
+        tp.setTypeface(Typeface.DEFAULT_BOLD);
+        Paint.FontMetrics fm = tp.getFontMetrics();
+        c.drawText("Clipboard history", clipPanelRect.left + dp(14f),
+                clipPanelRect.top + dp(22f) - (fm.ascent + fm.descent) / 2f, tp);
+
+        for (int i = 0; i < clipItemRects.size(); i++) {
+            RectF r = clipItemRects.get(i);
+            paint.setColor(pal.dark ? 0xFF26272F : 0xFFF0F1F5);
+            c.drawRoundRect(r, dp(8f), dp(8f), paint);
+            String s = clipItems.get(i).replace('\n', ' ');
+            if (s.length() > 28) s = s.substring(0, 28) + "\u2026";
+            tp.setColor(pal.text);
+            tp.setTextSize(sp(13f));
+            tp.setTextAlign(Paint.Align.CENTER);
+            tp.setTypeface(Typeface.DEFAULT);
+            c.drawText(s, r.centerX(), r.centerY() - (fm.ascent + fm.descent) / 2f, tp);
+        }
+
+        drawPanelButton(c, clipClearRect, "Clear", 0xFFFF5F6D);
+        drawPanelButton(c, clipCloseRect, "Close", pal.accent);
+    }
+
+    private void drawPanelButton(Canvas c, RectF r, String label, int tint) {
+        if (r == null) return;
+        paint.setColor(tint);
+        c.drawRoundRect(r, dp(9f), dp(9f), paint);
+        tp.setColor(0xFFFFFFFF);
+        tp.setTextSize(sp(13f));
+        tp.setTextAlign(Paint.Align.CENTER);
+        tp.setTypeface(Typeface.DEFAULT_BOLD);
+        Paint.FontMetrics fm = tp.getFontMetrics();
+        c.drawText(label, r.centerX(), r.centerY() - (fm.ascent + fm.descent) / 2f, tp);
     }
 
     private float sp(float v) {
@@ -645,6 +724,6 @@ public class KeyboardView extends View {
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         handler.removeCallbacksAndMessages(null);
-        if (popupAnimator != null) { popupAnimator.cancel(); popupAnimator = null; }
+        if (popAnimator != null) { popAnimator.cancel(); popAnimator = null; }
     }
 }
